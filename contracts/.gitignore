@@ -1,0 +1,14 @@
+.env
+.env.local
+.env.dev
+.env.prod
+
+artifacts
+
+# Verified sources pulled from Etherscan with `cast source`.
+# Reproducible on demand — do not commit (1.5MB+).
+ens-src*/
+
+out/
+cache/
+broadcast/
