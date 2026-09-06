@@ -61,9 +61,17 @@ export class ConfigError extends Error {
   }
 }
 
-/** Records that must be present. `agent.heartbeat` is deliberately not here. */
+/**
+ * The one record the agent may write. It appears in three places — the write
+ * itself, the config read, and the owner's authorizeTextRoles grant — so it is
+ * spelled once. A typo here does not fail loudly: it authorises one key and
+ * writes another, and the revert says nothing useful about which.
+ */
+export const HEARTBEAT_KEY = "agent.heartbeat";
+
+/** Records that must be present. The heartbeat is deliberately not among them. */
 const REQUIRED_TEXT = ["agent.model", "agent.endpoint", "agent.prompt"] as const;
-const TEXT_KEYS = [...REQUIRED_TEXT, "agent.heartbeat"] as const;
+const TEXT_KEYS = [...REQUIRED_TEXT, HEARTBEAT_KEY] as const;
 
 /**
  * viem's revert messages run to thirty lines, which is right for a stack trace

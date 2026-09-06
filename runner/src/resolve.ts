@@ -34,8 +34,13 @@ export const universalResolverAbi = parseAbi([
 
 /** Used to encode the inner request and to decode the reply it comes back in. */
 export const resolverAbi = parseAbi([
+  // The revert the runner exists to catch. Named here so viem can decode it
+  // instead of reporting an undecoded selector — or, if you go through cast,
+  // "failed to estimate gas" with no reason at all.
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
   "function text(bytes32 node, string key) view returns (string)",
   "function addr(bytes32 node) view returns (address)",
+  "function setText(bytes32 node, string key, string value)",
 ]);
 
 /**
