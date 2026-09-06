@@ -14,8 +14,12 @@ import { privateKeyToAccount } from "viem/accounts";
 import { CHAIN, createRunnerClient } from "./chain.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 
-/** Roughly 40 heartbeats of headroom. An agent that dies broke looks revoked. */
-const MIN_GAS = parseEther("0.002");
+/**
+ * Informational only. The runner probes its authorization with eth_call and
+ * never sends a transaction, so an agent with an empty wallet is fine — the
+ * balance matters only for the manual `npm run heartbeat` tool.
+ */
+const NOTABLE_GAS = parseEther("0.002");
 
 type Check = { label: string; ok: boolean; detail: string };
 
@@ -82,26 +86,24 @@ async function main() {
       : `${short(account.address)} ≠ AGENT_ADDRESS ${short(env.agentAddress)}`,
   });
 
-  // 4 — the agent can pay for its own heartbeats. It signs them itself.
+  // 4 — balance, for information. Not a gate: see NOTABLE_GAS above.
+  let gasNote = "not checked — wrong or unreachable chain";
   if (onSepolia) {
     try {
       const balance = await client.getBalance({ address: account.address });
-      const funded = balance >= MIN_GAS;
-      checks.push({
-        label: "gas",
-        ok: funded,
-        detail: funded ? eth(balance) : `${eth(balance)} — below minimum ${eth(MIN_GAS)}`,
-      });
+      gasNote =
+        balance >= NOTABLE_GAS
+          ? `${eth(balance)} — enough for manual writes`
+          : `${eth(balance)} — read-only operation unaffected`;
     } catch (error) {
-      checks.push({ label: "gas", ok: false, detail: `balance unreadable — ${why(error)}` });
+      gasNote = `balance unreadable — ${why(error)}`;
     }
-  } else {
-    checks.push({ label: "gas", ok: false, detail: "not checked — wrong or unreachable chain" });
   }
 
   // Print every result, passing or not: fixing one variable at a time, four
   // times over, is its own kind of 2am.
   console.log(`   capsule   ${env.capsuleName}`);
+  console.log(`   gas       ${gasNote}`);
   for (const check of checks) {
     console.log(`${check.ok ? "✅" : "❌"} ${check.label.padEnd(9)} ${check.detail}`);
   }

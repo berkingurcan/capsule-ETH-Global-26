@@ -1,11 +1,13 @@
 /**
  * The heartbeat — the agent asking the protocol whether it is still allowed.
  *
- * Every beat is a setText on one record of the agent's own name, signed by the
- * agent's own key. ENSv2 checks permission on every write, so the transaction
- * succeeding is not only "I am alive": it is "I am still authorised". When the
- * owner revokes, this call is where they find out, and nothing of ours is
- * involved in telling them.
+ * Two ways to ask, and the runner uses the cheap one.
+ *
+ *   probeHeartbeat  eth_call. Free. Same modifier, same revert. This is what
+ *                   the loop runs, every tick.
+ *   writeHeartbeat  a real transaction. Kept as a manual tool, not called by
+ *                   the loop: paying gas to learn what a free call already
+ *                   tells you does not become a better answer.
  *
  * Two habits matter here and both come out of hard-won notes:
  *
@@ -17,7 +19,7 @@
  *                     A revoke arriving in between mines a reverted receipt —
  *                     which is exactly the race the demo creates on purpose.
  */
-import type { Hex, PublicClient } from "viem";
+import type { Address, Hex, PublicClient } from "viem";
 import type { RunnerWallet } from "./chain.js";
 import { HEARTBEAT_KEY, type CapsuleConfig } from "./config.js";
 import { resolverAbi } from "./resolve.js";
@@ -45,6 +47,40 @@ export class HeartbeatRevertedError extends Error {
 
 export function heartbeatValue(sequence: number): string {
   return `beat-${sequence}`;
+}
+
+/**
+ * Asks the resolver whether this agent may still write its heartbeat, without
+ * writing it.
+ *
+ * simulateContract is an eth_call: free, and it runs the same onlyPartRoles
+ * modifier the real transaction would, so a revoked agent gets back the same
+ * EACUnauthorizedAccountRoles it would get from a send. The permission being
+ * probed is real and revocable; the agent simply checks it rather than
+ * spending gas to exercise it.
+ *
+ * The consequence worth knowing: agent.heartbeat never advances on chain, so
+ * an on-chain "last seen" is not available. The owner's revocation event is,
+ * and that is the one the subgraph in build step 5 cares about.
+ *
+ * Throws exactly what a denied write throws. Task 6's classifier reads it.
+ */
+export async function probeHeartbeat(args: {
+  publicClient: PublicClient;
+  config: CapsuleConfig;
+  agent: Address;
+  /** The value a real write would use. Irrelevant to the check, kept honest. */
+  sequence: number;
+}): Promise<void> {
+  const { publicClient, config, agent, sequence } = args;
+
+  await publicClient.simulateContract({
+    address: config.resolver,
+    abi: resolverAbi,
+    functionName: "setText",
+    args: [config.node, HEARTBEAT_KEY, heartbeatValue(sequence)],
+    account: agent,
+  });
 }
 
 export type WriteHeartbeatArgs = {

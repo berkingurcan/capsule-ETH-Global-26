@@ -49,6 +49,8 @@ export type RunnerEnv = {
   agentKey: Hex;
   agentAddress: Address;
   capsuleName: string;
+  /** Seconds between authorization probes. Free, so this can be brisk. */
+  tickSeconds: number;
   /**
    * Development only: talk to a local prompt service instead of the endpoint
    * published on the name. Not a fallback — it applies only when explicitly
@@ -91,6 +93,12 @@ export function loadEnv(): RunnerEnv {
     );
   }
 
+  const rawTick = optionalEnv("TICK_SECONDS") ?? "30";
+  const tickSeconds = Number(rawTick);
+  if (!Number.isSafeInteger(tickSeconds) || tickSeconds < 5) {
+    throw new InvalidEnvError("TICK_SECONDS", "must be a whole number of seconds, at least 5");
+  }
+
   const endpointOverride = optionalEnv("CAPSULE_ENDPOINT_OVERRIDE");
   if (endpointOverride !== undefined) {
     try {
@@ -100,5 +108,5 @@ export function loadEnv(): RunnerEnv {
     }
   }
 
-  return { rpcUrl, agentKey, agentAddress, capsuleName, endpointOverride };
+  return { rpcUrl, agentKey, agentAddress, capsuleName, tickSeconds, endpointOverride };
 }

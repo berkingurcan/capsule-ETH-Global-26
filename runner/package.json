@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Capsule agent runner — resolves its own ENS name, heartbeats, halts on revoke",
   "scripts": {
+    "start": "tsx src/runner.ts",
     "preflight": "tsx src/preflight.ts",
     "resolve": "tsx src/resolve.cli.ts",
     "config": "tsx src/config.cli.ts",
