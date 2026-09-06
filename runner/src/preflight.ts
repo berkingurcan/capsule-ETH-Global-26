@@ -9,9 +9,9 @@
  * Exits 0 with every check passing, 1 otherwise. Nothing else.
  */
 import "dotenv/config";
-import { createPublicClient, formatEther, http, isAddressEqual, parseEther } from "viem";
-import { sepolia } from "viem/chains";
+import { formatEther, isAddressEqual, parseEther } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { CHAIN, createRunnerClient } from "./chain.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 
 /** Roughly 40 heartbeats of headroom. An agent that dies broke looks revoked. */
@@ -42,7 +42,7 @@ async function main() {
   }
 
   const checks: Check[] = [];
-  const client = createPublicClient({ chain: sepolia, transport: http(env.rpcUrl) });
+  const client = createRunnerClient(env.rpcUrl);
 
   // 1 + 2 — the chain is reachable, and it is the chain we think it is.
   let chainId: number | undefined;
@@ -54,7 +54,7 @@ async function main() {
     checks.push({ label: "rpc", ok: false, detail: `unreachable — ${why(error)}` });
   }
 
-  const onSepolia = chainId === sepolia.id;
+  const onSepolia = chainId === CHAIN.id;
   checks.push({
     label: "chain",
     ok: onSepolia,
@@ -63,7 +63,7 @@ async function main() {
         ? "not checked — RPC unreachable"
         : onSepolia
           ? `${chainId} (sepolia)`
-          : `${chainId} — expected ${sepolia.id} (sepolia)`,
+          : `${chainId} — expected ${CHAIN.id} (sepolia)`,
   });
 
   // 3 — the key we hold is the agent's key.

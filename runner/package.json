@@ -4,6 +4,7 @@
   "description": "Capsule agent runner — resolves its own ENS name, heartbeats, halts on revoke",
   "scripts": {
     "preflight": "tsx src/preflight.ts",
+    "resolve": "tsx src/resolve.cli.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
