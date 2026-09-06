@@ -1,20 +1,22 @@
 /**
- * Writes exactly one heartbeat and stops.
+ * Writes one heartbeat, and reacts to it not being allowed.
  *
  *   npm run heartbeat
  *
- * A real Sepolia transaction, paid for by the agent's own key. Reads the
- * current beat off the name first, so the sequence continues across processes
- * rather than restarting — the count lives on chain, not in memory.
+ * Exit codes are load-bearing. A revoked agent exits 0: it did not crash, it
+ * did the thing it was built to do. Fly restarts on failure, so exiting 1 here
+ * would turn the kill switch into a crash loop — boot, read, beat, revert, die,
+ * repeat. Everything else keeps exiting 1, because bad config, no gas and an
+ * unreachable chain might all be fixed by the time it comes back up.
  */
 import "dotenv/config";
 import { privateKeyToAccount } from "viem/accounts";
 import { createRunnerClient, createRunnerWallet } from "./chain.js";
 import { ConfigError, loadCapsuleConfig } from "./config.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
-import { HeartbeatRevertedError, heartbeatValue, writeHeartbeat } from "./heartbeat.js";
-
-const why = (error: unknown) => (error instanceof Error ? error.message : String(error));
+import { shortRevert } from "./errors.js";
+import { classifyHeartbeatFailure, confirmRevoked } from "./halt.js";
+import { heartbeatValue, writeHeartbeat } from "./heartbeat.js";
 
 async function main() {
   let env;
@@ -45,11 +47,11 @@ async function main() {
   }
 
   const sequence = config.heartbeat.sequence + 1;
-  const value = heartbeatValue(sequence);
+  const previous = config.heartbeat.raw === "" ? "(never beaten)" : config.heartbeat.raw;
 
   console.log(`   capsule    ${config.name}`);
   console.log(`   resolver   ${config.resolver} (discovered)`);
-  console.log(`   writing    setText(agent.heartbeat, "${value}") as ${account.address}`);
+  console.log(`   writing    setText(agent.heartbeat, "${heartbeatValue(sequence)}") as ${account.address}`);
 
   try {
     const result = await writeHeartbeat({ publicClient, walletClient, config, sequence });
@@ -57,21 +59,43 @@ async function main() {
     console.log(
       `✅ mined      block ${result.blockNumber} · ${result.gasUsed.toLocaleString("en-US")} gas`,
     );
-    console.log(
-      `✅ heartbeat  ${config.heartbeat.raw === "" ? "(never beaten)" : config.heartbeat.raw} → ${result.value}`,
-    );
+    console.log(`✅ heartbeat  ${previous} → ${result.value}`);
+    return;
   } catch (error) {
-    if (error instanceof HeartbeatRevertedError) {
-      console.error(`❌ heartbeat  reverted on chain — ${error.hash}`);
+    if (classifyHeartbeatFailure(error) === "transient") {
+      console.error(`⚠️  transient  ${shortRevert(error)}`);
+      console.error("heartbeat failed — not a revocation");
       process.exit(1);
     }
-    // Left raw on purpose. Task 6 is where a denied write stops being a crash
-    // and becomes a decision, and it needs to see the error as it arrives.
-    throw error;
+
+    // Denied. Now find out what was actually taken away, because the revert
+    // reports the name-level resource whichever key you were refused on.
+    console.log(`🔴 denied     setText(agent.heartbeat) refused by the resolver`);
+
+    const { revoked, roles } = await confirmRevoked(publicClient, config, account.address);
+
+    if (!revoked) {
+      // The role is still held, so this was something else wearing a
+      // revocation's clothes. Keep running rather than dying of a guess.
+      console.error(
+        `⚠️  inconsistent  denied, but ROLE_SET_TEXT is still held (name ${roles.perName}, wildcard ${roles.wildcard})`,
+      );
+      console.error("heartbeat failed — not a revocation");
+      process.exit(1);
+    }
+
+    console.log(`🔴 confirmed  no ROLE_SET_TEXT on agent.heartbeat, and none via the wildcard`);
+    console.log(`🔴 halted     ${config.name} · last beat ${previous}`);
+    // There is nothing to write on the way out. The one record this agent was
+    // allowed to touch is the one it has just been locked out of, so its death
+    // has no on-chain notice — only the owner's revocation event, which the
+    // subgraph in build step 5 indexes.
+    console.log("runner halted");
+    process.exit(0);
   }
 }
 
 main().catch((error) => {
-  console.error(`❌ heartbeat failed — ${why(error)}`);
+  console.error(`❌ heartbeat crashed — ${shortRevert(error)}`);
   process.exit(1);
 });

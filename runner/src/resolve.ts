@@ -41,6 +41,9 @@ export const resolverAbi = parseAbi([
   "function text(bytes32 node, string key) view returns (string)",
   "function addr(bytes32 node) view returns (address)",
   "function setText(bytes32 node, string key, string value)",
+  // Free, and unambiguous — unlike the revert, which reports the name-level
+  // resource whatever key you were actually denied on.
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
 ]);
 
 /**

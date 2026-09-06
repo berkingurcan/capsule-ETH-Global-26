@@ -13,8 +13,6 @@
  * runner finally dies there is exactly one thing it can mean.
  */
 import {
-  BaseError,
-  ContractFunctionRevertedError,
   decodeFunctionResult,
   encodeFunctionData,
   isAddressEqual,
@@ -24,6 +22,7 @@ import {
   type PublicClient,
 } from "viem";
 import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
+import { shortRevert } from "./errors.js";
 import { decodeText, encodeName, resolverAbi, universalResolverAbi } from "./resolve.js";
 
 export type Heartbeat = {
@@ -72,21 +71,6 @@ export const HEARTBEAT_KEY = "agent.heartbeat";
 /** Records that must be present. The heartbeat is deliberately not among them. */
 const REQUIRED_TEXT = ["agent.model", "agent.endpoint", "agent.prompt"] as const;
 const TEXT_KEYS = [...REQUIRED_TEXT, HEARTBEAT_KEY] as const;
-
-/**
- * viem's revert messages run to thirty lines, which is right for a stack trace
- * and wrong for a log stream a dashboard renders. Reduce to the error name.
- */
-function shortRevert(error: unknown): string {
-  if (error instanceof BaseError) {
-    const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError);
-    if (reverted instanceof ContractFunctionRevertedError) {
-      return reverted.data?.errorName ?? reverted.reason ?? reverted.shortMessage;
-    }
-    return error.shortMessage;
-  }
-  return error instanceof Error ? (error.message.split("\n")[0] ?? error.message) : String(error);
-}
 
 /** "beat-7" -> 7, "" -> 0. Tolerates anything; the runner should not die of this. */
 function parseSequence(raw: string): number {
