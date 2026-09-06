@@ -6,6 +6,8 @@
     "preflight": "tsx src/preflight.ts",
     "resolve": "tsx src/resolve.cli.ts",
     "config": "tsx src/config.cli.ts",
+    "prompt": "tsx src/prompt.cli.ts",
+    "dev:prompt-server": "tsx dev/prompt-server.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],

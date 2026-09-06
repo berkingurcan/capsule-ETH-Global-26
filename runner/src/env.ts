@@ -37,12 +37,25 @@ export function requireEnv(name: string): string {
   return raw.trim();
 }
 
+/** Reads a variable if it is set. Undefined is a valid answer; "" is not. */
+export function optionalEnv(name: string): string | undefined {
+  const raw = process.env[name];
+  return raw === undefined || raw.trim() === "" ? undefined : raw.trim();
+}
+
 export type RunnerEnv = {
   rpcUrl: string;
   /** The AGENT key — deliberately the least privileged key in the system. */
   agentKey: Hex;
   agentAddress: Address;
   capsuleName: string;
+  /**
+   * Development only: talk to a local prompt service instead of the endpoint
+   * published on the name. Not a fallback — it applies only when explicitly
+   * set, and every caller announces it in the logs when it is. The record on
+   * chain stays the source of truth for a deployed agent.
+   */
+  endpointOverride: string | undefined;
 };
 
 export function loadEnv(): RunnerEnv {
@@ -78,5 +91,14 @@ export function loadEnv(): RunnerEnv {
     );
   }
 
-  return { rpcUrl, agentKey, agentAddress, capsuleName };
+  const endpointOverride = optionalEnv("CAPSULE_ENDPOINT_OVERRIDE");
+  if (endpointOverride !== undefined) {
+    try {
+      new URL(endpointOverride);
+    } catch {
+      throw new InvalidEnvError("CAPSULE_ENDPOINT_OVERRIDE", "is not a URL");
+    }
+  }
+
+  return { rpcUrl, agentKey, agentAddress, capsuleName, endpointOverride };
 }

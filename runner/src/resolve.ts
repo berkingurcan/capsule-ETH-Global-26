@@ -12,6 +12,7 @@ import {
   encodeFunctionData,
   parseAbi,
   toHex,
+  zeroAddress,
   type Address,
   type Hex,
   type PublicClient,
@@ -73,6 +74,40 @@ export function encodeName(name: string): NameEncoding {
     node: namehash(normalized),
     dnsName: toHex(packetToBytes(normalized)),
   };
+}
+
+export type AddrRecord = {
+  /** zeroAddress when the name publishes no address. */
+  address: Address;
+  resolver: Address;
+};
+
+/**
+ * Reads the `addr` record — who the name says it is.
+ *
+ * The runner checks this against itself and refuses to boot on a mismatch.
+ * The prompt service checks it against a request signature. Same record, two
+ * directions: it is the closest thing Capsule has to an identity database, and
+ * it is one the protocol already maintains.
+ */
+export async function readAddr(client: PublicClient, name: string): Promise<AddrRecord> {
+  const { node, dnsName } = encodeName(name);
+
+  const data = encodeFunctionData({ abi: resolverAbi, functionName: "addr", args: [node] });
+
+  const [result, resolver] = await client.readContract({
+    address: UNIVERSAL_RESOLVER_V2,
+    abi: universalResolverAbi,
+    functionName: "resolve",
+    args: [dnsName, data],
+  });
+
+  const address =
+    result === "0x"
+      ? zeroAddress
+      : decodeFunctionResult({ abi: resolverAbi, functionName: "addr", data: result });
+
+  return { address, resolver };
 }
 
 export type TextRecord = {
