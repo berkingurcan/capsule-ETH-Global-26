@@ -19,14 +19,33 @@ import {
 import { namehash, normalize, packetToBytes } from "viem/ens";
 import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
 
-const universalResolverAbi = parseAbi([
+export const universalResolverAbi = parseAbi([
+  // The errors matter as much as the function. Without them viem cannot name
+  // what went wrong and prints thirty lines of undecoded selector per failed
+  // read — and in step 4 a stranger typing a name that does not exist is the
+  // single most common thing that will happen to this code.
+  "error ResolverNotFound(bytes name)",
+  "error ResolverNotContract(bytes name, address resolver)",
+  "error DNSDecodingFailed(bytes dns)",
+  "error UnsupportedResolverProfile(bytes4 selector)",
   "function resolve(bytes name, bytes data) view returns (bytes, address)",
 ]);
 
 /** Used to encode the inner request and to decode the reply it comes back in. */
-const resolverAbi = parseAbi([
+export const resolverAbi = parseAbi([
   "function text(bytes32 node, string key) view returns (string)",
+  "function addr(bytes32 node) view returns (address)",
 ]);
+
+/**
+ * text() with nothing behind it answers with an ABI-encoded empty string, which
+ * decodes cleanly to "". A resolver that answers with zero bytes instead would
+ * throw in the decoder, so both shapes collapse to the same "not set" here.
+ */
+export function decodeText(result: Hex): string {
+  if (result === "0x") return "";
+  return decodeFunctionResult({ abi: resolverAbi, functionName: "text", data: result });
+}
 
 export type NameEncoding = {
   /** ENSIP-15 normalized. */
@@ -93,15 +112,6 @@ export async function readText(
   });
 
   // `result` is text()'s return value, still ABI-encoded — resolve() passes it
-  // through untouched. A resolver with nothing to say may answer with zero
-  // bytes rather than an encoded empty string; decoding that would throw.
-  if (result === "0x") return { value: "", resolver };
-
-  const value = decodeFunctionResult({
-    abi: resolverAbi,
-    functionName: "text",
-    data: result,
-  });
-
-  return { value, resolver };
+  // through untouched.
+  return { value: decodeText(result), resolver };
 }

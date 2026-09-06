@@ -5,6 +5,7 @@
   "scripts": {
     "preflight": "tsx src/preflight.ts",
     "resolve": "tsx src/resolve.cli.ts",
+    "config": "tsx src/config.cli.ts",
     "typecheck": "tsc --noEmit"
   },
   "keywords": [],
