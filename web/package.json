@@ -7,17 +7,23 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "preflight": "node --env-file=.env.local --import tsx scripts/preflight.ts",
+    "check:wire": "node --import tsx scripts/check-wire.ts",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@neondatabase/serverless": "^1.1.0",
     "next": "^15.5.25",
     "react": "19.1.1",
-    "react-dom": "19.1.1"
+    "react-dom": "19.1.1",
+    "viem": "^2.56.3"
   },
   "devDependencies": {
     "@types/node": "22.10.2",
     "@types/react": "19.1.8",
     "@types/react-dom": "19.1.6",
+    "tsx": "^4.23.13",
     "typescript": "5.7.2"
   }
 }
