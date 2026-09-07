@@ -22,8 +22,8 @@
 import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 import { randomBytes } from "node:crypto";
 import type { Address, Hex } from "viem";
-import { aad, open, seal } from "./crypto.js";
-import type { ServerEnv } from "./env.js";
+import { aad, open, seal } from "./crypto";
+import type { ServerEnv } from "./env";
 
 /** Attempts to find a free ref before giving up. Collisions are ~1 in 16.7M. */
 const REF_ATTEMPTS = 5;

@@ -16,7 +16,7 @@ import { neon } from "@neondatabase/serverless";
 import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
-import { loadServerEnv } from "../lib/capsule/env.js";
+import { loadServerEnv } from "../lib/capsule/env";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const dir = resolve(here, "../db/migrations");

@@ -14,6 +14,25 @@ import { sepolia } from "viem/chains";
 
 export const CHAIN = sepolia;
 
+/** ENSv2 Sepolia beta. The resolver address is per-owner, so every read goes
+ *  through here rather than to a resolver we would have to know in advance. */
+export const UNIVERSAL_RESOLVER_V2 = "0x4a1817d13e9cf196f471725176355c1234b63c70" as const;
+
+export const universalResolverAbi = parseAbi([
+  "error ResolverNotFound(bytes name)",
+  "error ResolverNotContract(bytes name, address resolver)",
+  "error DNSDecodingFailed(bytes dns)",
+  "error UnsupportedResolverProfile(bytes4 selector)",
+  "function resolve(bytes name, bytes data) view returns (bytes, address)",
+]);
+
+export const resolverAbi = parseAbi([
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "function text(bytes32 node, string key) view returns (string)",
+  "function addr(bytes32 node) view returns (address)",
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+]);
+
 export const minterAbi = parseAbi([
   "error ZeroAddress()",
   "error InvalidLabel(string label)",

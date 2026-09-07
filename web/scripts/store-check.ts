@@ -15,9 +15,9 @@
  */
 import { neon } from "@neondatabase/serverless";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
-import { aad, open, seal, SealedDataError } from "../lib/capsule/crypto.js";
-import { loadServerEnv } from "../lib/capsule/env.js";
-import { createAgent, createPrompt, createStore, readAgent, readPrompt, StoreError } from "../lib/capsule/store.js";
+import { aad, open, seal, SealedDataError } from "../lib/capsule/crypto";
+import { loadServerEnv } from "../lib/capsule/env";
+import { createAgent, createPrompt, createStore, readAgent, readPrompt, StoreError } from "../lib/capsule/store";
 
 const VICTIM = "victim.storecheck.eth";
 const ATTACKER = "attacker.storecheck.eth";

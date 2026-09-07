@@ -10,9 +10,9 @@
  *   npm run preflight
  */
 import { neon } from "@neondatabase/serverless";
-import { createServerClient, minterAbi } from "../lib/capsule/chain.js";
-import { loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env.js";
-import { getApp } from "../lib/capsule/fly.js";
+import { createServerClient, minterAbi } from "../lib/capsule/chain";
+import { loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
+import { getApp } from "../lib/capsule/fly";
 
 type Check = { name: string; ok: boolean; detail: string };
 

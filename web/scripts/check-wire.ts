@@ -21,7 +21,7 @@ import {
   HEADER_TIMESTAMP,
   HEADER_SIGNATURE,
   promptFetchMessage,
-} from "../lib/capsule/wire.js";
+} from "../lib/capsule/wire";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runnerPrompt = resolve(here, "../../runner/src/prompt.ts");
