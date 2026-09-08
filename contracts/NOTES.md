@@ -11,7 +11,8 @@ Everything below was verified against the live Sepolia beta, not from docs.
 | Parent name | `capsulefleet.eth` |
 | Our subregistry (`PermissionedRegistry`) | `0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e` |
 | Our resolver (`PermissionedResolver` proxy) | `0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3` |
-| **`CapsuleMinter`** (ours) | `0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362` |
+| **`CapsuleMinter`** (ours) | `0x193Bb7dB059a6f93e796d97da278465d20224819` |
+| …superseded, dotted keys | ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ |
 | Parent namehash | `0x036a91f25e11db713abf00b569adb0a03c248d7b9f291430dac6807860d4a6b3` |
 | Parent DNS encoding | `0x0c63617073756c65666c6565740365746800` |
 | Test agent EOA | `0xca266f69EE3EFed7eC71CE5062f5A07c18908905` |
@@ -354,6 +355,37 @@ given the wrong one, and it changes on every redeploy. Two things follow:
   not `0x0000aa36a7`. A padded reference encodes the same chain as a different string,
   and therefore a different record key, which resolves to empty. `interopAddressOf` is
   `public pure` precisely so the fixture can be checked against it without a deployment.
+
+### 15. Re-registering a label keeps its records AND its role grants
+
+`register` reverts while a live registration stands, so re-minting `trader` onto a new
+minter means `unregister(tokenId)` first. What that does and does not clear cost us a
+verification pass to establish:
+
+| | survives the burn? |
+|---|---|
+| registry tokenId | **no** — a version counter in the low bits increments (`…088` → `…089`) |
+| namehash | **yes** — it is a hash of the label and parent, and neither changed |
+| resolver text records | **yes** — they are keyed by node |
+| EAC role grants on the node | **yes** — same reason |
+
+The third and fourth rows are the ones that bite. After the Phase 3 re-mint,
+`analyst` still served `agent.prompt = "cap_8f3d1a"` under the old dotted key
+*and* still had the agent holding `ROLE_SET_TEXT` on `agent.heartbeat` — a live
+write permission pointing at nothing, on a name whose current config lives under
+different keys entirely. Both were cleared by hand:
+
+```bash
+# revoke the dangling grant
+cast send $CAPSULE_RESOLVER 'authorizeTextRoles(bytes,string,address,bool)' \
+  $DNS "agent.heartbeat" $AGENT_ADDRESS false
+
+# clear each stale value
+cast send $CAPSULE_RESOLVER 'setText(bytes32,string,string)' $NODE "agent.prompt" ""
+```
+
+`MintCapsules.s.sol` deliberately does not do this inside the broadcast: what to wipe is
+a judgement call, and burying it in a script makes it invisible.
 
 ## Next
 

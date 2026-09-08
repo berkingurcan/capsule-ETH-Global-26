@@ -204,8 +204,8 @@ contract CapsuleMinterTest is Test {
     ///      ERC-7930 layout. Sepolia's chain id is 0xaa36a7, three bytes.
     function test_interopAddress_matchesTheErc7930Fixture() public view {
         assertEq(
-            minter.interopAddressOf(11155111, 0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362),
-            "0x0001000003aa36a714e609ae1cfb8277ce14286428aa1d0d88a337a362"
+            minter.interopAddressOf(11155111, 0x193Bb7dB059a6f93e796d97da278465d20224819),
+            "0x0001000003aa36a714193bb7db059a6f93e796d97da278465d20224819"
         );
     }
 
@@ -214,12 +214,12 @@ contract CapsuleMinterTest is Test {
     ///      key. Mainnet is the one-byte case, and 0x0100 the two-byte one.
     function test_interopAddress_chainReferenceIsMinimal() public view {
         assertEq(
-            minter.interopAddressOf(1, 0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362),
-            "0x00010000010114e609ae1cfb8277ce14286428aa1d0d88a337a362"
+            minter.interopAddressOf(1, 0x193Bb7dB059a6f93e796d97da278465d20224819),
+            "0x00010000010114193bb7db059a6f93e796d97da278465d20224819"
         );
         assertEq(
-            minter.interopAddressOf(256, 0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362),
-            "0x0001000002010014e609ae1cfb8277ce14286428aa1d0d88a337a362"
+            minter.interopAddressOf(256, 0x193Bb7dB059a6f93e796d97da278465d20224819),
+            "0x0001000002010014193bb7db059a6f93e796d97da278465d20224819"
         );
     }
 
