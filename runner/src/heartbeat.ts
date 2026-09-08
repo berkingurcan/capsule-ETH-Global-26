@@ -21,7 +21,10 @@
  */
 import type { Address, Hex, PublicClient } from "viem";
 import type { RunnerWallet } from "./chain.js";
-import { HEARTBEAT_KEY, type CapsuleConfig } from "./config.js";
+import type { CapsuleConfig } from "./config.js";
+import { HEARTBEAT_KEY, heartbeatValue } from "./records.js";
+
+export { heartbeatValue } from "./records.js";
 import { resolverAbi } from "./resolve.js";
 
 /** Sepolia blocks land in ~12s; well past that means something is wrong. */
@@ -45,9 +48,6 @@ export class HeartbeatRevertedError extends Error {
   }
 }
 
-export function heartbeatValue(sequence: number): string {
-  return `beat-${sequence}`;
-}
 
 /**
  * Asks the resolver whether this agent may still write its heartbeat, without

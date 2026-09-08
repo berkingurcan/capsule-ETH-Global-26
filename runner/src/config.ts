@@ -24,6 +24,16 @@ import {
 import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
 import { shortRevert } from "./errors.js";
 import { decodeText, encodeName, resolverAbi, universalResolverAbi } from "./resolve.js";
+import {
+  RECORD_KEYS,
+  REQUIRED_TEXT_KEYS,
+  TEXT_KEYS,
+  parseHeartbeatSequence,
+} from "./records.js";
+
+// Re-exported so the rest of the runner keeps importing it from here, which is
+// where it has always lived. The string itself is now defined once, in records.ts.
+export { HEARTBEAT_KEY } from "./records.js";
 
 export type Heartbeat = {
   /** As written on chain, e.g. "beat-7". Empty if the agent has never beaten. */
@@ -60,25 +70,8 @@ export class ConfigError extends Error {
   }
 }
 
-/**
- * The one record the agent may write. It appears in three places — the write
- * itself, the config read, and the owner's authorizeTextRoles grant — so it is
- * spelled once. A typo here does not fail loudly: it authorises one key and
- * writes another, and the revert says nothing useful about which.
- */
-export const HEARTBEAT_KEY = "agent.heartbeat";
-
-/** Records that must be present. The heartbeat is deliberately not among them. */
-const REQUIRED_TEXT = ["agent.model", "agent.endpoint", "agent.prompt"] as const;
-const TEXT_KEYS = [...REQUIRED_TEXT, HEARTBEAT_KEY] as const;
-
-/** "beat-7" -> 7, "" -> 0. Tolerates anything; the runner should not die of this. */
-function parseSequence(raw: string): number {
-  const match = /(\d+)\s*$/.exec(raw);
-  if (!match) return 0;
-  const parsed = Number(match[1]);
-  return Number.isSafeInteger(parsed) && parsed >= 0 ? parsed : 0;
-}
+// The key strings live in ./records.ts — see the note there on why a typo in
+// one of them looks exactly like a revocation.
 
 export async function loadCapsuleConfig(
   client: PublicClient,
@@ -174,22 +167,22 @@ export async function loadCapsuleConfig(
     text[key] = decodeText(data);
   });
 
-  for (const key of REQUIRED_TEXT) {
+  for (const key of REQUIRED_TEXT_KEYS) {
     if (text[key] === "") problems.push(`${key} — not set on this name`);
   }
 
   if (problems.length > 0) throw new ConfigError(problems);
 
-  const heartbeatRaw = text["agent.heartbeat"] ?? "";
+  const heartbeatRaw = text[RECORD_KEYS.heartbeat] ?? "";
 
   return {
     name: normalized,
     node,
     resolver: resolver as Address,
     agent,
-    model: text["agent.model"]!,
-    endpoint: text["agent.endpoint"]!,
-    promptRef: text["agent.prompt"]!,
-    heartbeat: { raw: heartbeatRaw, sequence: parseSequence(heartbeatRaw) },
+    model: text[RECORD_KEYS.model]!,
+    endpoint: text[RECORD_KEYS.endpointCapsule]!,
+    promptRef: text[RECORD_KEYS.prompt]!,
+    heartbeat: { raw: heartbeatRaw, sequence: parseHeartbeatSequence(heartbeatRaw) },
   };
 }

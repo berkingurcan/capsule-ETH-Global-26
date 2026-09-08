@@ -143,6 +143,37 @@ contract CapsuleMinterTest is Test {
         resolver.grantRootRoles(minter.REQUIRED_RESOLVER_ROOT_ROLES(), address(minter));
     }
 
+    // --- record keys: asserted against literals, because a typo cannot be seen ---
+    //
+    // The mirror of these values lives in runner/src/records.ts and
+    // web/lib/capsule/records.ts; `npm run check:records` in web/ compares all three.
+    // Asserted here too so a Solidity-side edit fails in `forge test` rather than on
+    // chain, where a mismatched key is byte-identical to a revocation.
+    //
+    // Four of them are still dotted: live names on the deployed minter carry those
+    // strings, and the kebab-case rename ships with the Phase 2 redeploy.
+
+    function test_recordKeys_matchTheSpec() public view {
+        // ENSIP-27
+        assertEq(minter.KEY_CLASS(), "class");
+        assertEq(minter.KEY_SCHEMA(), "schema");
+        assertEq(minter.CLASS_VALUE(), "Agent");
+        // ENSIP-26
+        assertEq(minter.KEY_CONTEXT(), "agent-context");
+        assertEq(minter.KEY_ENDPOINT_WEB(), "agent-endpoint[web]");
+        // our schema
+        assertEq(minter.KEY_RUNTIME(), "agent-runtime");
+    }
+
+    function test_recordKeys_pendingRename() public view {
+        // Phase 2 flips these four and this test with them. Until then they must NOT
+        // drift: every name on 0xe609aE… carries exactly these strings.
+        assertEq(minter.KEY_MODEL(), "agent.model");
+        assertEq(minter.KEY_ENDPOINT_CAPSULE(), "agent.endpoint");
+        assertEq(minter.KEY_PROMPT(), "agent.prompt");
+        assertEq(minter.KEY_HEARTBEAT(), "agent.heartbeat");
+    }
+
     // --- encoding: the values below came off-chain, so a mismatch is a real bug ---
 
     function test_nodeOf_matchesLiveChain() public view {

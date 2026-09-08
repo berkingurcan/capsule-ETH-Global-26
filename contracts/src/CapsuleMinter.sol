@@ -55,15 +55,53 @@ contract CapsuleMinter {
     // Record keys
     ////////////////////////////////////////////////////////////////////////
 
+    // Spelled once per codebase and cross-checked, because a mismatch between the key
+    // that was authorized and the key that gets written does NOT fail loudly: the
+    // resolver reverts against the name-level resource whichever key was denied, so a
+    // stale string is byte-identical to a revocation. The other two copies are
+    // `runner/src/records.ts` and `web/lib/capsule/records.ts`; `npm run check:records`
+    // in web/ asserts all three agree.
+    //
+    // Spec: ../../Branding-ENSClaw/RECORDS.md
+    //
+    // The four keys already written on chain still hold their DOTTED values — live
+    // names carry `agent.model`, and renaming here without a redeploy would lock every
+    // running agent out of its own heartbeat. The kebab-case rename is Phase 2 and
+    // lands in all three files at once. Keys marked NEW have never been written, so
+    // they carry their final ENSIP values already.
+
+    /// @notice ENSIP-27 node classification. NEW.
+    string public constant KEY_CLASS = "class";
+
+    /// @notice ENSIP-27 pointer to the JSON Schema covering our own keys. NEW.
+    string public constant KEY_SCHEMA = "schema";
+
+    /// @notice ENSIP-26 free-form description of the agent. NEW.
+    string public constant KEY_CONTEXT = "agent-context";
+
+    /// @notice ENSIP-26. The human-facing interface — for a capsule, the Telegram bot. NEW.
+    string public constant KEY_ENDPOINT_WEB = "agent-endpoint[web]";
+
+    /// @notice ENSIP-26 syntax, our own protocol tag: the control plane the runner
+    ///         fetches its prompt and credentials from. Phase 2 -> "agent-endpoint[capsule]".
+    string public constant KEY_ENDPOINT_CAPSULE = "agent.endpoint";
+
+    /// @notice Phase 2 -> "agent-model".
     string public constant KEY_MODEL = "agent.model";
-    string public constant KEY_ENDPOINT = "agent.endpoint";
+
+    /// @notice The agent runtime, e.g. "openclaw". NEW.
+    string public constant KEY_RUNTIME = "agent-runtime";
 
     /// @dev An opaque pointer such as "cap_8f3d1a", never the prompt itself and never a
     ///      secret. The prompt body and any API keys stay encrypted off-chain.
+    ///      Phase 2 -> "agent-prompt".
     string public constant KEY_PROMPT = "agent.prompt";
 
-    /// @notice The only key the agent may write.
+    /// @notice The only key the agent may write. Phase 2 -> "agent-heartbeat".
     string public constant KEY_HEARTBEAT = "agent.heartbeat";
+
+    /// @notice ENSIP-27 `class` value, pascal-case. Must equal the served schema's `title`.
+    string public constant CLASS_VALUE = "Agent";
 
     ////////////////////////////////////////////////////////////////////////
     // Immutables
@@ -155,7 +193,7 @@ contract CapsuleMinter {
         // 3. Write the config. Uses this contract's own root ROLE_SET_TEXT / ROLE_SET_ADDR.
         RESOLVER.setAddr(node, agent);
         RESOLVER.setText(node, KEY_MODEL, config.model);
-        RESOLVER.setText(node, KEY_ENDPOINT, config.endpoint);
+        RESOLVER.setText(node, KEY_ENDPOINT_CAPSULE, config.endpoint);
         RESOLVER.setText(node, KEY_PROMPT, config.promptPointer);
 
         // 4. The agent may write exactly one key.

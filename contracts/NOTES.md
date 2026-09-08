@@ -273,6 +273,44 @@ The `_ADMIN` half is required because `authorizeTextRoles` calls `_checkCanGrant
 before granting. Root-level, because the name does not exist when the minter is deployed,
 so a per-name grant is impossible.
 
+## Standards gotchas — ENSIP-25/26/27
+
+Verified against the published ENSIPs on 2026-09-08, before the kebab-case rename.
+The record contract itself is `../../Branding-ENSClaw/RECORDS.md`; these are the three
+things that will silently produce a non-conforming name if forgotten.
+
+### 9. ENSIP-27's key grammar allows ONE bracket group
+
+The spec's regex is:
+
+```
+^key-name(\[[^\]]+\])?$
+```
+
+So `agent-endpoint[web]` is a valid schema attribute and
+`agent-registration[<registry>][<agentId>]` is **not** — it has two groups. That key is
+fine to *write*, because ENSIP-25 defines it; it is not fine to *declare* in our
+ENSIP-27 schema. `capsule-agent-v1.json` therefore describes exactly four properties —
+`agent-model`, `agent-runtime`, `agent-prompt`, `agent-heartbeat` — and nothing that an
+ENSIP already owns (`class`, `schema`, `agent-context`, `agent-endpoint[*]`, `addr`).
+
+Nothing on chain rejects an over-broad schema. A strict ENSIP-27 client does.
+
+### 10. The schema's `title` must equal the `class` value
+
+ENSIP-27 requires it. `class = "Agent"` therefore pins `"title": "Agent"` in the served
+JSON Schema. Two records, one string — they move together or neither is conforming.
+
+### 11. `agent-heartbeat` is `beat-<n>`, never a timestamp
+
+The value is a monotonic counter, so a write must read the previous value first —
+`loadCapsuleConfig` already returns `heartbeat.sequence` from the per-tick multicall, so
+the read is free. On-chain last-seen comes from the subgraph's `block.timestamp`, not
+from the record.
+
+Worth stating because the UI mock (`web/components/AgentDetail.tsx`) has carried a unix
+timestamp in this field since before the decision. The spec is right; the mock is wrong.
+
 ## Next
 
 Step 3 of the build plan: the runner. It resolves its own name through
