@@ -17,18 +17,20 @@
  *
  *   npm run check:records
  */
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import {
   CLASS_VALUE,
+  HEARTBEAT_KEY,
   OWN_SCHEMA_KEYS,
   RECORD_KEYS,
   REGISTRATION_VALUE,
   registrationKey,
   type RecordKeyName,
 } from "../lib/capsule/records";
+import { SCHEMA_DIALECT, SCHEMA_PATH, capsuleAgentSchema } from "../lib/capsule/schema";
 import {
   PROVIDERS,
   PROVIDER_IDS,
@@ -175,6 +177,137 @@ for (const key of OWN_SCHEMA_KEYS) {
     key,
     ENSIP27_ATTRIBUTE.test(key),
     `"${key}" must be kebab-case with at most one bracket group`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 3b. The served document itself.
+//
+// Section 3 checks the key strings we intend to publish. This checks what
+// `/schema/capsule-agent-v1.json` actually hands a validator, which is a
+// different thing and the one a judge fetches. The URI is a `CapsuleMinter`
+// constructor argument written into every name permanently, so a document that
+// drifts from the records cannot be corrected for names that already exist.
+// ---------------------------------------------------------------------------
+type Attr = { type?: string; recordType?: string; description?: string; pattern?: string; enum?: string[]; examples?: string[] };
+const SCHEMA_ID = `https://example.invalid${SCHEMA_PATH}`;
+const schemaDoc = capsuleAgentSchema(SCHEMA_ID) as {
+  $schema?: string;
+  $id?: string;
+  title?: string;
+  properties?: Record<string, Attr>;
+  required?: string[];
+  additionalProperties?: unknown;
+};
+const properties = schemaDoc.properties ?? {};
+
+expect("schema title is the class value", schemaDoc.title === CLASS_VALUE, `title "${schemaDoc.title}" vs class "${CLASS_VALUE}"`);
+expect("schema dialect is 2020-12", schemaDoc.$schema === SCHEMA_DIALECT, `got "${schemaDoc.$schema}"`);
+expect("schema $id is the fetch URI", schemaDoc.$id === SCHEMA_ID, `got "${schemaDoc.$id}"`);
+
+// Exactly our four keys — no more, no fewer, in order. Fewer means a record we
+// ship is undescribed; more means we redeclared something an ENSIP owns.
+const declared = Object.keys(properties);
+expect(
+  "schema declares exactly OWN_SCHEMA_KEYS",
+  declared.length === OWN_SCHEMA_KEYS.length && declared.every((k, i) => k === OWN_SCHEMA_KEYS[i]),
+  `declared [${declared.join(", ")}] vs [${OWN_SCHEMA_KEYS.join(", ")}]`,
+);
+
+// ENSIP-27 wants a flat object of described string attributes. `recordType`
+// tells a client which ENS record carries the value; all of ours are text.
+for (const key of OWN_SCHEMA_KEYS) {
+  const attr: Attr | undefined = properties[key];
+  const problems: string[] = [];
+  if (attr === undefined) problems.push("missing");
+  else {
+    if (attr.type !== "string") problems.push(`type "${String(attr.type)}" is not "string"`);
+    if (attr.recordType !== "text") problems.push(`recordType "${String(attr.recordType)}" is not "text"`);
+    if (typeof attr.description !== "string" || attr.description.trim() === "") problems.push("no description");
+    if ("properties" in attr || "items" in attr) problems.push("is not flat");
+  }
+  expect(`schema property ${key}`, problems.length === 0, problems.join("; "));
+}
+
+// The heartbeat is the one key a conforming name may lack: a freshly minted
+// capsule has never written it. Same exception as REQUIRED_TEXT_KEYS.
+const required: string[] = schemaDoc.required ?? [];
+const expectedRequired = OWN_SCHEMA_KEYS.filter((k) => k !== HEARTBEAT_KEY);
+expect(
+  "schema requires everything but the heartbeat",
+  required.length === expectedRequired.length && required.every((k, i) => k === expectedRequired[i]),
+  `required [${required.join(", ")}] vs [${expectedRequired.join(", ")}]`,
+);
+
+// A capsule name carries `class`, `schema`, `addr` and three ENSIP-26 keys
+// besides these four. Sealing the object declares every real name invalid.
+expect(
+  "schema does not seal the object",
+  schemaDoc.additionalProperties !== false,
+  `additionalProperties is false — every real capsule name would fail validation`,
+);
+
+// RECORDS.md: no allOf/anyOf/oneOf, and nothing to dereference. A published
+// schema that needs a second fetch is a second URL that can 404.
+const FORBIDDEN_KEYWORDS = ["allOf", "anyOf", "oneOf", "not", "$ref", "$defs", "definitions"];
+const found = new Set<string>();
+(function walk(node: unknown): void {
+  if (Array.isArray(node)) { node.forEach(walk); return; }
+  if (node === null || typeof node !== "object") return;
+  for (const [k, v] of Object.entries(node)) {
+    if (FORBIDDEN_KEYWORDS.includes(k)) found.add(k);
+    walk(v);
+  }
+})(schemaDoc);
+expect("schema uses no composition keywords", found.size === 0, `found: ${[...found].join(", ")}`);
+
+// The published pattern and the parser that reads the record must agree, or a
+// name validates and fails to boot — or boots and fails validation.
+const modelPattern = new RegExp(properties[RECORD_KEYS.model]?.pattern ?? "(?!)");
+for (const ref of [
+  "anthropic/claude-opus-5",
+  "openrouter/anthropic/claude-sonnet-4-6",
+  "",
+  "claude-opus-5",
+  "/claude-opus-5",
+  "anthropic/",
+]) {
+  const parses = parseModelRef(ref) !== null;
+  expect(
+    `agent-model pattern agrees with parseModelRef on "${ref}"`,
+    modelPattern.test(ref) === parses,
+    `pattern says ${modelPattern.test(ref)}, parser says ${parses}`,
+  );
+}
+
+// Every example we publish has to satisfy the constraint we publish beside it.
+// An example that does not is a value an owner will copy into a record.
+for (const key of OWN_SCHEMA_KEYS) {
+  const attr: Attr = properties[key] ?? {};
+  const bad = (attr.examples ?? []).filter(
+    (e) =>
+      (attr.pattern !== undefined && !new RegExp(attr.pattern).test(e)) ||
+      (attr.enum !== undefined && !attr.enum.includes(e)),
+  );
+  expect(`${key} examples satisfy their own constraints`, bad.length === 0, `fails: ${bad.join(", ")}`);
+}
+
+// The deployed URI and the served path, which is the drift that produced a
+// 404 on every minted name once already. Local-only: contracts/.env is not
+// committed, so this is skipped where it does not exist rather than failed.
+const contractsEnv = resolve(here, "../../contracts/.env");
+if (existsSync(contractsEnv)) {
+  const configured = /^CAPSULE_SCHEMA_URI=(.+)$/m.exec(readFileSync(contractsEnv, "utf8"))?.[1]?.trim();
+  let servedPath: string | undefined;
+  try {
+    servedPath = configured === undefined ? undefined : new URL(configured).pathname;
+  } catch {
+    servedPath = undefined;
+  }
+  expect(
+    "CAPSULE_SCHEMA_URI points at the served path",
+    servedPath === SCHEMA_PATH,
+    `contracts/.env serves "${servedPath ?? configured ?? "<unset>"}", route serves "${SCHEMA_PATH}"`,
   );
 }
 
