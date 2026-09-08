@@ -10,6 +10,7 @@
     "lint": "next lint",
     "preflight": "node --env-file=.env.local --import tsx scripts/preflight.ts",
     "check:wire": "node --import tsx scripts/check-wire.ts",
+    "check:records": "node --import tsx scripts/check-records.ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "node --env-file=.env.local --import tsx scripts/migrate.ts",
     "check:store": "node --env-file=.env.local --import tsx scripts/store-check.ts",

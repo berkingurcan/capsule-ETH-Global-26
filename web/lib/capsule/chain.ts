@@ -37,7 +37,10 @@ export const minterAbi = parseAbi([
   "error ZeroAddress()",
   "error InvalidLabel(string label)",
   "error MissingResolverRoles()",
-  "struct CapsuleConfig { string model; string endpoint; string promptPointer; }",
+  // Field order is the ABI. Keep it identical to the struct in CapsuleMinter.sol —
+  // viem encodes a tuple positionally, so a reordering here silently writes the
+  // Telegram URL into `agent-context`.
+  "struct CapsuleConfig { string context; string telegramUrl; string capsuleEndpoint; string model; string runtime; string promptPointer; }",
   "function mint(string label, address owner, address agent, CapsuleConfig config) returns (uint256 tokenId, bytes32 node)",
   "function nodeOf(string label) view returns (bytes32)",
   "function dnsNameOf(string label) view returns (bytes)",
@@ -46,7 +49,16 @@ export const minterAbi = parseAbi([
   "function checkResolverRoles() view",
   "function PARENT_NODE() view returns (bytes32)",
   "function DURATION() view returns (uint64)",
-  "event CapsuleMinted(bytes32 indexed node, address indexed owner, address indexed agent, uint256 tokenId, string label, string model, string endpoint, string promptPointer, uint64 expiry)",
+  "function SCHEMA_URI() view returns (string)",
+  // ENSIP-25. Read these rather than rebuilding the key locally: the interoperable
+  // address is derived from the deployment's own chain id and address, so it changes
+  // on every redeploy and a hardcoded copy goes stale without failing.
+  "function REGISTRY_INTEROP_ADDRESS() view returns (string)",
+  "function registrationKey(uint256 tokenId) view returns (string)",
+  "function interopAddressOf(uint256 chainId, address account) pure returns (string)",
+  // Carries no record values on purpose: the resolver emits its own event per
+  // setText, so an indexer reads the config from there or from the records.
+  "event CapsuleMinted(bytes32 indexed node, address indexed owner, address indexed agent, uint256 tokenId, string label, uint64 expiry)",
 ]);
 
 export function createServerClient(rpcUrl: string): PublicClient {

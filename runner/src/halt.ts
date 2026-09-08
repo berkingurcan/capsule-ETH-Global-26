@@ -10,10 +10,18 @@
  * assumed transient, and before halting the runner confirms the revocation
  * against the role table rather than trusting the revert — which, per the
  * resolver's onlyPartRoles modifier, names the wrong resource on purpose.
+ *
+ * Since the heartbeat became a real transaction there is a third answer, and it
+ * has to be its own answer rather than a shade of "transient": an empty wallet.
+ * Both a revoked agent and a broke one stop writing, so from the chain they look
+ * the same, and the log is the only place the difference survives. An unfunded
+ * agent is still authorized, still probing and still holding its permission —
+ * it must say so and keep running.
  */
 import {
   BaseError,
   ContractFunctionRevertedError,
+  InsufficientFundsError,
   encodeAbiParameters,
   hexToBigInt,
   keccak256,
@@ -31,14 +39,20 @@ export const ROLE_SET_TEXT = 16n;
 
 const ZERO_NODE = `0x${"0".repeat(64)}` as Hex;
 
-export type HeartbeatVerdict = "revoked" | "transient";
+export type HeartbeatVerdict =
+  /** The owner took the permission away. The one fatal answer. */
+  | "revoked"
+  /** The agent cannot pay for the write. Still authorized, still alive. */
+  | "unfunded"
+  /** Anything else. Assumed to be the chain having a bad minute. */
+  | "transient";
 
 /**
  * resource = uint256(keccak256(abi.encode(node, part)))
  *
  * `part` is keccak256 of the record key for a per-key resource, and zero for
  * the name-level one. Reproduce from the shell with:
- *   cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent.heartbeat'))
+ *   cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent-heartbeat'))
  */
 export function textResource(node: Hex, key: string): bigint {
   const part = keccak256(toHex(key));
@@ -61,13 +75,36 @@ export function classifyHeartbeatFailure(error: unknown): HeartbeatVerdict {
   if (error instanceof HeartbeatRevertedError) return "revoked";
 
   if (error instanceof BaseError) {
+    // A decoded revert is answered from the revert and never from matching
+    // text. The contract said no for a reason it named; whether the wallet
+    // could have paid does not come into it, and a message that happens to
+    // contain the word "funds" must not be able to change this answer.
     const reverted = error.walk((e) => e instanceof ContractFunctionRevertedError);
     if (reverted instanceof ContractFunctionRevertedError) {
       return reverted.data?.errorName === "EACUnauthorizedAccountRoles" ? "revoked" : "transient";
     }
+
+    if (error.walk((e) => e instanceof InsufficientFundsError) !== null) return "unfunded";
+    if (matchesNodeShortfall(error.details) || matchesNodeShortfall(error.shortMessage)) {
+      return "unfunded";
+    }
   }
 
-  return "transient";
+  return matchesNodeShortfall(error instanceof Error ? error.message : String(error))
+    ? "unfunded"
+    : "transient";
+}
+
+/**
+ * viem's own wording test for a node reporting a shortfall, borrowed rather
+ * than rewritten so it cannot drift from what viem itself matches.
+ *
+ * Needed because viem only produces the typed InsufficientFundsError when it
+ * recognises the node's phrasing, and every client phrases it differently.
+ * Only ever reached once a decoded revert has been ruled out.
+ */
+function matchesNodeShortfall(text: string | undefined): boolean {
+  return text !== undefined && InsufficientFundsError.nodeMessage.test(text);
 }
 
 export type RoleCheck = {

@@ -1,13 +1,20 @@
 /**
- * The heartbeat — the agent asking the protocol whether it is still allowed.
+ * The heartbeat — the agent asking the protocol whether it is still allowed,
+ * and then recording that it asked.
  *
- * Two ways to ask, and the runner uses the cheap one.
+ * Two operations, and the loop runs both at different cadences.
  *
- *   probeHeartbeat  eth_call. Free. Same modifier, same revert. This is what
- *                   the loop runs, every tick.
- *   writeHeartbeat  a real transaction. Kept as a manual tool, not called by
- *                   the loop: paying gas to learn what a free call already
- *                   tells you does not become a better answer.
+ *   probeHeartbeat  eth_call. Free. Same modifier, same revert as the write, so
+ *                   it detects a revocation just as well. Every tick.
+ *   writeHeartbeat  a real transaction. Every HEARTBEAT_SECONDS.
+ *
+ * Why both, when the probe already answers the question: the probe is the
+ * *check* and the write is the *record*. A free call proves the permission is
+ * live to the process holding it and to nobody else — it leaves no trace, so
+ * there is no on-chain last-seen, and an agent that quietly died last Tuesday
+ * is indistinguishable from one that is fine. The write is what an observer
+ * with only the chain can read. Probing between writes is what keeps a
+ * revocation caught in seconds rather than in hours.
  *
  * Two habits matter here and both come out of hard-won notes:
  *
@@ -21,11 +28,70 @@
  */
 import type { Address, Hex, PublicClient } from "viem";
 import type { RunnerWallet } from "./chain.js";
-import { HEARTBEAT_KEY, type CapsuleConfig } from "./config.js";
+import type { CapsuleConfig } from "./config.js";
+import { HEARTBEAT_KEY, heartbeatValue } from "./records.js";
+
+export { heartbeatValue } from "./records.js";
 import { resolverAbi } from "./resolve.js";
 
 /** Sepolia blocks land in ~12s; well past that means something is wrong. */
 const RECEIPT_TIMEOUT_MS = 90_000;
+
+/**
+ * What one beat costs. Measured on Sepolia, not estimated from first principles:
+ *
+ *   66,420   cast estimate, before any beat existed
+ *   64,739   beat-1, the real transaction — writing over an empty record
+ *   47,639   beat-2 onwards, steady state
+ *
+ * The first write to an empty string pays for fresh storage; every one after it
+ * overwrites. Kept at the highest of the three deliberately — this only ever
+ * turns a balance into a number of beats for a log line, and a warning that
+ * arrives early is worth more than an estimate that flatters the wallet.
+ */
+export const BEAT_GAS = 66_420n;
+
+/**
+ * Below this many remaining beats, the boot log stops being informational.
+ *
+ * A count, not a balance: what matters is how long the agent can keep beating,
+ * and that depends on the gas price on the day. 100 beats is a month at the
+ * production cadence of three a day — enough warning to act on, and not so
+ * eager that a demo wallet nags.
+ */
+export const LOW_BEATS = 100;
+
+export type Funding = {
+  balance: bigint;
+  gasPrice: bigint;
+  /** Whole beats affordable at the current price. */
+  beats: number;
+  low: boolean;
+};
+
+/**
+ * How much longer this agent can afford to say it is alive.
+ *
+ * Read at boot and reported either way. An agent that cannot pay for its own
+ * heartbeat still probes, still detects a revocation and still holds its
+ * permission — it simply leaves no trace — so this is a warning and never a
+ * gate. The one thing it must not do is stay quiet, because a stopped
+ * heartbeat with no explanation is the exact shape of a revocation.
+ */
+export async function readFunding(
+  publicClient: PublicClient,
+  agent: Address,
+): Promise<Funding> {
+  const [balance, gasPrice] = await Promise.all([
+    publicClient.getBalance({ address: agent }),
+    publicClient.getGasPrice(),
+  ]);
+
+  const perBeat = BEAT_GAS * gasPrice;
+  const beats = perBeat === 0n ? Number.MAX_SAFE_INTEGER : Number(balance / perBeat);
+
+  return { balance, gasPrice, beats, low: beats < LOW_BEATS };
+}
 
 export type HeartbeatResult = {
   /** What was written, e.g. "beat-2". */
@@ -45,9 +111,6 @@ export class HeartbeatRevertedError extends Error {
   }
 }
 
-export function heartbeatValue(sequence: number): string {
-  return `beat-${sequence}`;
-}
 
 /**
  * Asks the resolver whether this agent may still write its heartbeat, without
@@ -55,15 +118,14 @@ export function heartbeatValue(sequence: number): string {
  *
  * simulateContract is an eth_call: free, and it runs the same onlyPartRoles
  * modifier the real transaction would, so a revoked agent gets back the same
- * EACUnauthorizedAccountRoles it would get from a send. The permission being
- * probed is real and revocable; the agent simply checks it rather than
- * spending gas to exercise it.
+ * EACUnauthorizedAccountRoles it would get from a send.
  *
- * The consequence worth knowing: agent.heartbeat never advances on chain, so
- * an on-chain "last seen" is not available. The owner's revocation event is,
- * and that is the one the subgraph in build step 5 cares about.
+ * This runs every tick, between the paid writes, so the window between an
+ * owner pressing Recall and the agent stopping is one tick and not one
+ * heartbeat interval. It also costs nothing when the wallet is empty, which is
+ * why an unfunded agent still knows whether it is authorized.
  *
- * Throws exactly what a denied write throws. Task 6's classifier reads it.
+ * Throws exactly what a denied write throws. halt.ts's classifier reads it.
  */
 export async function probeHeartbeat(args: {
   publicClient: PublicClient;
@@ -100,8 +162,10 @@ export type WriteHeartbeatArgs = {
  * fifteen seconds to confirm simply starts the next one fifteen seconds later,
  * which is the correct behaviour for a liveness signal.
  *
- * Nothing here catches EACUnauthorizedAccountRoles. That is the next task's
- * job, and it needs the error to arrive intact.
+ * Nothing here catches EACUnauthorizedAccountRoles, and nothing here catches an
+ * empty wallet either. Both are halt.ts's job, and it needs the errors to
+ * arrive intact — the difference between them is the difference between a
+ * revoked agent and an unfunded one, and only one of those should stop.
  */
 export async function writeHeartbeat(args: WriteHeartbeatArgs): Promise<HeartbeatResult> {
   const { publicClient, walletClient, config, sequence } = args;

@@ -3,6 +3,9 @@
  *
  *   npm run heartbeat
  *
+ * The loop in runner.ts beats on its own now; this stays as the tool for
+ * beating once, on purpose, and watching exactly what happens.
+ *
  * Exit codes are load-bearing. A revoked agent exits 0: it did not crash, it
  * did the thing it was built to do. Fly restarts on failure, so exiting 1 here
  * would turn the kill switch into a crash loop — boot, read, beat, revert, die,
@@ -10,13 +13,15 @@
  * unreachable chain might all be fixed by the time it comes back up.
  */
 import "dotenv/config";
+import { formatEther, formatGwei } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { createRunnerClient, createRunnerWallet } from "./chain.js";
 import { ConfigError, loadCapsuleConfig } from "./config.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked } from "./halt.js";
-import { heartbeatValue, writeHeartbeat } from "./heartbeat.js";
+import { heartbeatValue, readFunding, writeHeartbeat } from "./heartbeat.js";
+import { HEARTBEAT_KEY } from "./records.js";
 
 async function main() {
   let env;
@@ -51,7 +56,7 @@ async function main() {
 
   console.log(`   capsule    ${config.name}`);
   console.log(`   resolver   ${config.resolver} (discovered)`);
-  console.log(`   writing    setText(agent.heartbeat, "${heartbeatValue(sequence)}") as ${account.address}`);
+  console.log(`   writing    setText(${HEARTBEAT_KEY}, "${heartbeatValue(sequence)}") as ${account.address}`);
 
   try {
     const result = await writeHeartbeat({ publicClient, walletClient, config, sequence });
@@ -62,7 +67,24 @@ async function main() {
     console.log(`✅ heartbeat  ${previous} → ${result.value}`);
     return;
   } catch (error) {
-    if (classifyHeartbeatFailure(error) === "transient") {
+    const verdict = classifyHeartbeatFailure(error);
+
+    // Switched on exhaustively rather than tested for one value. This branch
+    // used to read `!== "transient"` and fall through to the denied path, so
+    // the day a third verdict arrived an empty wallet would have printed
+    // "refused by the resolver" — the exact confusion this file exists to
+    // prevent, one `else` away.
+    if (verdict === "unfunded") {
+      const { balance, gasPrice, beats } = await readFunding(publicClient, account.address);
+      console.error(`⚠️  unfunded   ${account.address} cannot pay for this write`);
+      console.error(
+        `⚠️  balance    ${Number(formatEther(balance)).toFixed(6)} ETH · ~${beats} beats at ${Number(formatGwei(gasPrice)).toFixed(2)} gwei`,
+      );
+      console.error("heartbeat failed — not a revocation, the permission is intact");
+      process.exit(1);
+    }
+
+    if (verdict === "transient") {
       console.error(`⚠️  transient  ${shortRevert(error)}`);
       console.error("heartbeat failed — not a revocation");
       process.exit(1);
@@ -70,7 +92,7 @@ async function main() {
 
     // Denied. Now find out what was actually taken away, because the revert
     // reports the name-level resource whichever key you were refused on.
-    console.log(`🔴 denied     setText(agent.heartbeat) refused by the resolver`);
+    console.log(`🔴 denied     setText(${HEARTBEAT_KEY}) refused by the resolver`);
 
     const { revoked, roles } = await confirmRevoked(publicClient, config, account.address);
 
@@ -84,7 +106,7 @@ async function main() {
       process.exit(1);
     }
 
-    console.log(`🔴 confirmed  no ROLE_SET_TEXT on agent.heartbeat, and none via the wildcard`);
+    console.log(`🔴 confirmed  no ROLE_SET_TEXT on ${HEARTBEAT_KEY}, and none via the wildcard`);
     console.log(`🔴 halted     ${config.name} · last beat ${previous}`);
     // There is nothing to write on the way out. The one record this agent was
     // allowed to touch is the one it has just been locked out of, so its death

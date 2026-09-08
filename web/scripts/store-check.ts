@@ -57,7 +57,7 @@ async function main() {
   check("prompt round trip", back?.body === BODY, `got ${JSON.stringify(back?.body)}`);
 
   // ---- 2. the hole the dev server had -------------------------------------
-  // The attacker read `ref` off the chain — agent.prompt is a public record —
+  // The attacker read `ref` off the chain — agent-prompt is a public record —
   // and signs a request as a capsule it legitimately controls.
   const stolen = await readPrompt(store, { ref, capsuleName: ATTACKER });
   check("cross-capsule read refused", stolen === null, `leaked ${JSON.stringify(stolen?.body)}`);

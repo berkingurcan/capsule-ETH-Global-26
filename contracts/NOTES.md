@@ -11,7 +11,8 @@ Everything below was verified against the live Sepolia beta, not from docs.
 | Parent name | `capsulefleet.eth` |
 | Our subregistry (`PermissionedRegistry`) | `0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e` |
 | Our resolver (`PermissionedResolver` proxy) | `0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3` |
-| **`CapsuleMinter`** (ours) | `0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362` |
+| **`CapsuleMinter`** (ours) | `0x193Bb7dB059a6f93e796d97da278465d20224819` |
+| …superseded, dotted keys | ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ |
 | Parent namehash | `0x036a91f25e11db713abf00b569adb0a03c248d7b9f291430dac6807860d4a6b3` |
 | Parent DNS encoding | `0x0c63617073756c65666c6565740365746800` |
 | Test agent EOA | `0xca266f69EE3EFed7eC71CE5062f5A07c18908905` |
@@ -273,9 +274,122 @@ The `_ADMIN` half is required because `authorizeTextRoles` calls `_checkCanGrant
 before granting. Root-level, because the name does not exist when the minter is deployed,
 so a per-name grant is impossible.
 
+## Standards gotchas — ENSIP-25/26/27
+
+Verified against the published ENSIPs on 2026-09-08, before the kebab-case rename.
+The record contract itself is `../../Branding-ENSClaw/RECORDS.md`; these are the three
+things that will silently produce a non-conforming name if forgotten.
+
+### 9. ENSIP-27's key grammar allows ONE bracket group
+
+The spec's regex is:
+
+```
+^key-name(\[[^\]]+\])?$
+```
+
+So `agent-endpoint[web]` is a valid schema attribute and
+`agent-registration[<registry>][<agentId>]` is **not** — it has two groups. That key is
+fine to *write*, because ENSIP-25 defines it; it is not fine to *declare* in our
+ENSIP-27 schema. `capsule-agent-v1.json` therefore describes exactly four properties —
+`agent-model`, `agent-runtime`, `agent-prompt`, `agent-heartbeat` — and nothing that an
+ENSIP already owns (`class`, `schema`, `agent-context`, `agent-endpoint[*]`, `addr`).
+
+Nothing on chain rejects an over-broad schema. A strict ENSIP-27 client does.
+
+### 10. The schema's `title` must equal the `class` value
+
+ENSIP-27 requires it. `class = "Agent"` therefore pins `"title": "Agent"` in the served
+JSON Schema. Two records, one string — they move together or neither is conforming.
+
+### 11. `agent-heartbeat` is `beat-<n>`, never a timestamp
+
+The value is a monotonic counter, so a write must read the previous value first —
+`loadCapsuleConfig` already returns `heartbeat.sequence` from the per-tick multicall, so
+the read is free. On-chain last-seen comes from the subgraph's `block.timestamp`, not
+from the record.
+
+Worth stating because the UI mock (`web/components/AgentDetail.tsx`) has carried a unix
+timestamp in this field since before the decision. The spec is right; the mock is wrong.
+
+### 12. The nine-record mint costs about twice the three-record one, and that is fine
+
+Phase 2 took `mint()` from 3 `setText` calls to 9 plus `setAddr`, `register` and two
+authorizations. Measured before committing to the redeploy, because finding the ceiling
+on a live mint is the expensive way to find it:
+
+| | mocks (`forge test --gas-report`, median) | live `cast estimate` on 0xe609aE… |
+|---|---|---|
+| 3 records (Phase 1) | 501,956 | 489,822 |
+| 9 records (Phase 2) | 954,122 | — not deployed yet |
+
+The mock is within 2.5% of the real resolver on the shape we can measure both ways,
+which is the only reason the 954k number is worth quoting. Roughly +450k for six more
+records, ~75k each — dominated by cold `SSTORE`s on the string slots, so it scales with
+the record *values*, not the key names. `agent-context` is the long one.
+
+The plan held open the option of splitting `class` and `schema` into a second
+provisioner call. Not needed: ~950k is an ordinary NFT-with-metadata mint and nowhere
+near a block limit. Left as one transaction, which is also the demo claim — one
+signature, one name, fully configured.
+
+### 13. `mint()`'s event carries no record values any more
+
+`CapsuleMinted` used to repeat `model`, `endpoint` and `promptPointer` as log data.
+With nine records that would have meant paying for the same strings twice, since
+`PermissionedResolver` already emits its own event per `setText`. The event is now
+`(node, owner, agent, tokenId, label, expiry)` — the identity, not the config. An
+indexer that wants the config reads the resolver's logs or the records themselves.
+
+If you are reading an old log: the topic0 changed with the signature.
+
+### 14. `REGISTRY_INTEROP_ADDRESS` is derived, never configured
+
+The ENSIP-25 key needs this contract as an ERC-7930 interoperable address. It is built
+in the constructor from `block.chainid` and `address(this)`, so a deployment cannot be
+given the wrong one, and it changes on every redeploy. Two things follow:
+
+- The worked example in `../../Branding-ENSClaw/RECORDS.md` is a *fixture*, not a
+  constant. `DeployCapsuleMinter` prints the new one; update RECORDS.md from that.
+- The chain reference is length-prefixed and must be minimal — `0xaa36a7` for Sepolia,
+  not `0x0000aa36a7`. A padded reference encodes the same chain as a different string,
+  and therefore a different record key, which resolves to empty. `interopAddressOf` is
+  `public pure` precisely so the fixture can be checked against it without a deployment.
+
+### 15. Re-registering a label keeps its records AND its role grants
+
+`register` reverts while a live registration stands, so re-minting `trader` onto a new
+minter means `unregister(tokenId)` first. What that does and does not clear cost us a
+verification pass to establish:
+
+| | survives the burn? |
+|---|---|
+| registry tokenId | **no** — a version counter in the low bits increments (`…088` → `…089`) |
+| namehash | **yes** — it is a hash of the label and parent, and neither changed |
+| resolver text records | **yes** — they are keyed by node |
+| EAC role grants on the node | **yes** — same reason |
+
+The third and fourth rows are the ones that bite. After the Phase 3 re-mint,
+`analyst` still served `agent.prompt = "cap_8f3d1a"` under the old dotted key
+*and* still had the agent holding `ROLE_SET_TEXT` on `agent.heartbeat` — a live
+write permission pointing at nothing, on a name whose current config lives under
+different keys entirely. Both were cleared by hand:
+
+```bash
+# revoke the dangling grant
+cast send $CAPSULE_RESOLVER 'authorizeTextRoles(bytes,string,address,bool)' \
+  $DNS "agent.heartbeat" $AGENT_ADDRESS false
+
+# clear each stale value
+cast send $CAPSULE_RESOLVER 'setText(bytes32,string,string)' $NODE "agent.prompt" ""
+```
+
+`MintCapsules.s.sol` deliberately does not do this inside the broadcast: what to wipe is
+a judgement call, and burying it in a script makes it invisible.
+
 ## Next
 
 Step 3 of the build plan: the runner. It resolves its own name through
-`UniversalResolverV2`, writes `agent.heartbeat` on a timer, and **halts itself** when that
+`UniversalResolverV2`, writes `agent-heartbeat` on a timer, and **halts itself** when that
 write reverts with `EACUnauthorizedAccountRoles`. The revert is already reproducible by
 hand, so the runner has a known-good failure to catch.

@@ -4,6 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Capsule from "@/components/Capsule";
 import { MINT_PRICE, PARENT, ROLES, usd, type Role } from "@/lib/mock";
+import {
+  PROVIDERS,
+  PROVIDER_IDS,
+  SUGGESTED_MODELS,
+  parseModelRef,
+  type ProviderId,
+} from "@/lib/capsule/providers";
 
 /* ------------------------------------------------------------------
    The launchpad. Six steps, one form — the order matters: secrets are
@@ -14,20 +21,52 @@ import { MINT_PRICE, PARENT, ROLES, usd, type Role } from "@/lib/mock";
 
 const STEPS = ["Parent", "Roles", "Configure", "Pay", "Mint", "Live"];
 
-const MODELS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
 const ALL_TOOLS = ["price", "swap", "repo", "diff", "draft", "schedule", "search", "notify"];
+
+/* Every `<provider>/<model>` the picker offers, grouped the way it renders.
+   Not authoritative — OpenClaw's catalog is, and an owner may write any model
+   their provider serves. This exists so the common case is two clicks. */
+const MODEL_GROUPS = PROVIDER_IDS.map((id) => ({
+  provider: id,
+  label: PROVIDERS[id].label,
+  refs: SUGGESTED_MODELS[id].map((model) => `${id}/${model}`),
+}));
 
 type Draft = {
   slug: string;
   title: string;
   cap: string;
+  /** `<provider>/<model>`, written verbatim into `agent-model`. */
   model: string;
   tools: string[];
   prompt: string;
   price: string;
   token: string;
-  key: string;
+  /**
+   * One API key per provider, not one per capsule.
+   *
+   * A single unlabelled key would work exactly until the owner changed
+   * `agent-model` to a different provider — at which point the agent would go
+   * quiet, which is what a recall looks like. Storing them by provider is what
+   * makes "change the record, change the brain" survive a provider change.
+   */
+  keys: Partial<Record<ProviderId, string>>;
 };
+
+/** The provider half of a draft's model reference. */
+function providerOf(draft: Draft): ProviderId | undefined {
+  const parsed = parseModelRef(draft.model);
+  if (parsed === null) return undefined;
+  return PROVIDER_IDS.find((id) => id === parsed.provider);
+}
+
+/** True when this draft names a model it has no key to run. */
+function missingKey(draft: Draft): ProviderId | undefined {
+  const provider = providerOf(draft);
+  if (provider === undefined) return undefined;
+  const key = draft.keys[provider];
+  return key === undefined || key.trim() === "" ? provider : undefined;
+}
 
 function draftFrom(r: Role): Draft {
   return {
@@ -39,7 +78,7 @@ function draftFrom(r: Role): Draft {
     prompt: r.prompt,
     price: "0.10",
     token: "8412996731:AAH" + r.slug.slice(0, 3) + "x9Qd7Lm2pR",
-    key: "sk-ant-" + r.slug + "-••••••••••••",
+    keys: { [parseModelRef(r.model)?.provider as ProviderId]: "••••••••••••••••" },
   };
 }
 
@@ -333,6 +372,7 @@ function StepConfigure({
 }) {
   const d = drafts[Math.min(tab, drafts.length - 1)];
   const i = Math.min(tab, drafts.length - 1);
+  const missing = missingKey(d);
 
   return (
     <div className="panel pad-lg">
@@ -364,13 +404,23 @@ function StepConfigure({
         <div className="col" style={{ gap: 18 }}>
           <div className="field">
             <label className="label" htmlFor="model">
-              agent.model
+              agent-model
             </label>
             <select id="model" className="select" value={d.model} onChange={(e) => patch(i, { model: e.target.value })}>
-              {MODELS.map((m) => (
-                <option key={m}>{m}</option>
+              {MODEL_GROUPS.map((group) => (
+                <optgroup key={group.provider} label={group.label}>
+                  {group.refs.map((ref) => (
+                    <option key={ref} value={ref}>
+                      {ref}
+                    </option>
+                  ))}
+                </optgroup>
               ))}
             </select>
+            <span className="hint">
+              Written on chain as <span className="mono">&lt;provider&gt;/&lt;model&gt;</span>. Change it later
+              and the same machine restarts on a different brain — no redeploy, no re-mint.
+            </span>
           </div>
 
           <div className="field">
@@ -443,11 +493,57 @@ function StepConfigure({
           </div>
 
           <div className="field">
-            <label className="label" htmlFor="key">
-              Model API key
-            </label>
-            <input id="key" className="input" type="password" value={d.key} onChange={(e) => patch(i, { key: e.target.value })} />
+            <span className="label">Provider API keys</span>
+            <span className="hint" style={{ marginBottom: 10 }}>
+              One per provider, not one per agent. Give it a key for every provider you may want to
+              switch to — swapping <span className="mono">agent-model</span> to a provider with no key
+              stored stops the agent until you add one.
+            </span>
+
+            <div className="col" style={{ gap: 10 }}>
+              {PROVIDER_IDS.map((id) => {
+                const spec = PROVIDERS[id];
+                const active = providerOf(d) === id;
+                return (
+                  <div key={id} className="row" style={{ gap: 8, alignItems: "center" }}>
+                    <label
+                      className="mono"
+                      htmlFor={`key-${id}`}
+                      style={{
+                        width: 132,
+                        fontSize: 11,
+                        color: active ? "var(--ink)" : "var(--muted)",
+                        fontWeight: active ? 600 : 400,
+                      }}
+                      title={spec.envVar}
+                    >
+                      {spec.envVar}
+                    </label>
+                    <input
+                      id={`key-${id}`}
+                      className="input"
+                      type="password"
+                      placeholder={spec.keyHint}
+                      value={d.keys[id] ?? ""}
+                      onChange={(e) => patch(i, { keys: { ...d.keys, [id]: e.target.value } })}
+                      style={{ flex: 1 }}
+                    />
+                  </div>
+                );
+              })}
+            </div>
           </div>
+
+          {missing !== undefined && (
+            <div className="notice" style={{ borderColor: "var(--line)" }}>
+              <span className="tag">Heads up</span>
+              <p style={{ margin: 0 }}>
+                No key stored for <span className="mono">{missing}</span>. This capsule will mint, but it
+                cannot start on <span className="mono">{d.model}</span> until you add one — and an agent
+                that will not start looks exactly like an agent that was recalled.
+              </p>
+            </div>
+          )}
 
           <div className="tile shell">
             <div className="label" style={{ marginBottom: 10 }}>
@@ -457,19 +553,16 @@ function StepConfigure({
               <span className="d">addr </span>
               <span className="w">0x7a2f…6b09</span>
               {"\n"}
-              <span className="d">agent.model </span>
+              <span className="d">agent-model </span>
               <span className="w">{d.model}</span>
               {"\n"}
-              <span className="d">agent.tools </span>
-              <span className="w">{d.tools.join(",") || "—"}</span>
+              <span className="d">agent-runtime </span>
+              <span className="w">openclaw</span>
               {"\n"}
-              <span className="d">agent.price </span>
-              <span className="w">{d.price}</span>
-              {"\n"}
-              <span className="d">agent.secrets </span>
+              <span className="d">agent-prompt </span>
               <span className="y">cap_8f3d1a</span>
               {"\n"}
-              <span className="d">agent.heartbeat </span>
+              <span className="d">agent-heartbeat </span>
               <span className="g">written by the agent</span>
             </pre>
           </div>

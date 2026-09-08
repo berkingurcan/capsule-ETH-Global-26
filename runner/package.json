@@ -1,7 +1,7 @@
 {
   "name": "runner",
   "version": "1.0.0",
-  "description": "Capsule agent runner — resolves its own ENS name, heartbeats, halts on revoke",
+  "description": "Capsule agent runner \u2014 resolves its own ENS name, heartbeats, halts on revoke",
   "scripts": {
     "start": "tsx src/runner.ts",
     "preflight": "tsx src/preflight.ts",
@@ -10,7 +10,8 @@
     "prompt": "tsx src/prompt.cli.ts",
     "heartbeat": "tsx src/heartbeat.cli.ts",
     "dev:prompt-server": "tsx dev/prompt-server.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "dev:gateway-smoke": "docker build -t capsule-runner . && docker run --rm --network none -v \"$PWD/dev:/capsule/dev:ro\" --entrypoint node capsule-runner --import tsx /capsule/dev/gateway-smoke.ts"
   },
   "keywords": [],
   "author": "",

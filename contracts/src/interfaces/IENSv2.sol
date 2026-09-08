@@ -24,6 +24,19 @@ interface IPermissionedRegistry {
 
     function latestOwnerOf(uint256 tokenId) external view returns (address owner);
 
+    /// @notice Burn a registration so the label can be registered again.
+    /// @dev Needed to re-mint a label onto a new minter: `register` reverts while a
+    ///      live registration exists. Re-registering yields a NEW tokenId — the low
+    ///      bits carry a version — but the namehash is unchanged, so resolver records
+    ///      and EAC grants on the node SURVIVE. Clean them up explicitly.
+    function unregister(uint256 tokenId) external;
+
+    /// @notice Current tokenId for a label, or 0 if it has never been registered.
+    function findTokenId(string calldata label) external view returns (uint256 tokenId);
+
+    /// @notice Current owner of a label, or `address(0)` if unregistered or expired.
+    function findOwner(string calldata label) external view returns (address owner);
+
     function grantRootRoles(uint256 roleBitmap, address account) external returns (bool);
 
     function hasRoles(uint256 resource, uint256 roleBitmap, address account)
