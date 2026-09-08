@@ -23,7 +23,21 @@ import {
 } from "viem";
 import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
 import { shortRevert } from "./errors.js";
+import {
+  KEY_CONTEXT,
+  KEY_ENDPOINT_CAPSULE,
+  KEY_ENDPOINT_WEB,
+  KEY_HEARTBEAT,
+  KEY_MODEL,
+  KEY_PROMPT,
+  KEY_RUNTIME,
+  READ_KEYS,
+  REQUIRED_KEYS,
+  RUNTIME_OPENCLAW,
+} from "./records.js";
 import { decodeText, encodeName, resolverAbi, universalResolverAbi } from "./resolve.js";
+
+export { KEY_HEARTBEAT } from "./records.js";
 
 export type Heartbeat = {
   /** As written on chain, e.g. "beat-7". Empty if the agent has never beaten. */
@@ -45,9 +59,23 @@ export type CapsuleConfig = {
    * rather than a contract change. Swapping the value on chain is one setText.
    */
   model: string;
+  /** `agent-endpoint[capsule]` — the control plane. Required. */
   endpoint: string;
   /** A pointer such as "cap_8f3d1a". Never the prompt body — that stays off chain. */
   promptRef: string;
+  /**
+   * `agent-runtime`. Empty on a name minted before runtimes were named; treated as
+   * openclaw, because that is the only thing this binary can supervise. A name asking
+   * for something else is a hard failure rather than a silent substitution — see boot.
+   */
+  runtime: string;
+  /** ENSIP-26 `agent-context`. Passed to the runtime as the agent's description. */
+  context: string;
+  /**
+   * ENSIP-26 `agent-endpoint[web]` — the Telegram bot, e.g. `https://t.me/foo_bot`.
+   * Empty is normal: an owner can publish the bot after minting.
+   */
+  webEndpoint: string;
   heartbeat: Heartbeat;
 };
 
@@ -63,14 +91,15 @@ export class ConfigError extends Error {
 /**
  * The one record the agent may write. It appears in three places — the write
  * itself, the config read, and the owner's authorizeTextRoles grant — so it is
- * spelled once. A typo here does not fail loudly: it authorises one key and
- * writes another, and the revert says nothing useful about which.
+ * spelled once, in records.ts, alongside every other key. A typo does not fail
+ * loudly: it authorises one key and writes another, and the revert says nothing
+ * useful about which.
  */
-export const HEARTBEAT_KEY = "agent.heartbeat";
+export const HEARTBEAT_KEY = KEY_HEARTBEAT;
 
 /** Records that must be present. The heartbeat is deliberately not among them. */
-const REQUIRED_TEXT = ["agent.model", "agent.endpoint", "agent.prompt"] as const;
-const TEXT_KEYS = [...REQUIRED_TEXT, HEARTBEAT_KEY] as const;
+const REQUIRED_TEXT = REQUIRED_KEYS;
+const TEXT_KEYS = READ_KEYS;
 
 /** "beat-7" -> 7, "" -> 0. Tolerates anything; the runner should not die of this. */
 function parseSequence(raw: string): number {
@@ -180,16 +209,28 @@ export async function loadCapsuleConfig(
 
   if (problems.length > 0) throw new ConfigError(problems);
 
-  const heartbeatRaw = text["agent.heartbeat"] ?? "";
+  const heartbeatRaw = text[KEY_HEARTBEAT] ?? "";
+
+  // Unset means a name minted before `agent-runtime` existed, which predates any runtime
+  // but this one. A name naming a DIFFERENT runtime is refused rather than coerced: this
+  // process can only supervise OpenClaw, and pretending otherwise would boot an agent
+  // that is not the one the record describes.
+  const runtime = text[KEY_RUNTIME] === "" ? RUNTIME_OPENCLAW : (text[KEY_RUNTIME] ?? RUNTIME_OPENCLAW);
+  if (runtime !== RUNTIME_OPENCLAW) {
+    throw new ConfigError([`${KEY_RUNTIME} — "${runtime}" is not a runtime this binary can supervise`]);
+  }
 
   return {
     name: normalized,
     node,
     resolver: resolver as Address,
     agent,
-    model: text["agent.model"]!,
-    endpoint: text["agent.endpoint"]!,
-    promptRef: text["agent.prompt"]!,
+    model: text[KEY_MODEL]!,
+    endpoint: text[KEY_ENDPOINT_CAPSULE]!,
+    promptRef: text[KEY_PROMPT]!,
+    runtime,
+    context: text[KEY_CONTEXT] ?? "",
+    webEndpoint: text[KEY_ENDPOINT_WEB] ?? "",
     heartbeat: { raw: heartbeatRaw, sequence: parseSequence(heartbeatRaw) },
   };
 }

@@ -28,7 +28,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
               Capsule · ETHOnline 2026 · design demo
             </span>
             <span className="push mono" style={{ fontSize: 12, color: "var(--vend-300)" }}>
-              Names on ETH Sepolia · money on Base Sepolia · no bridge
+              ENSv2 on ETH Sepolia · ENSIP-25, 26 and 27 · one chain
             </span>
           </div>
         </footer>

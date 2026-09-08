@@ -17,6 +17,7 @@ import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked } from "./halt.js";
 import { heartbeatValue, writeHeartbeat } from "./heartbeat.js";
+import { KEY_HEARTBEAT } from "./records.js";
 
 async function main() {
   let env;
@@ -51,7 +52,7 @@ async function main() {
 
   console.log(`   capsule    ${config.name}`);
   console.log(`   resolver   ${config.resolver} (discovered)`);
-  console.log(`   writing    setText(agent.heartbeat, "${heartbeatValue(sequence)}") as ${account.address}`);
+  console.log(`   writing    setText(${KEY_HEARTBEAT}, "${heartbeatValue(sequence)}") as ${account.address}`);
 
   try {
     const result = await writeHeartbeat({ publicClient, walletClient, config, sequence });
@@ -70,7 +71,7 @@ async function main() {
 
     // Denied. Now find out what was actually taken away, because the revert
     // reports the name-level resource whichever key you were refused on.
-    console.log(`🔴 denied     setText(agent.heartbeat) refused by the resolver`);
+    console.log(`🔴 denied     setText(${KEY_HEARTBEAT}) refused by the resolver`);
 
     const { revoked, roles } = await confirmRevoked(publicClient, config, account.address);
 
@@ -84,7 +85,7 @@ async function main() {
       process.exit(1);
     }
 
-    console.log(`🔴 confirmed  no ROLE_SET_TEXT on agent.heartbeat, and none via the wildcard`);
+    console.log(`🔴 confirmed  no ROLE_SET_TEXT on ${KEY_HEARTBEAT}, and none via the wildcard`);
     console.log(`🔴 halted     ${config.name} · last beat ${previous}`);
     // There is nothing to write on the way out. The one record this agent was
     // allowed to touch is the one it has just been locked out of, so its death

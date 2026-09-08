@@ -94,10 +94,13 @@ export type ServerEnv = {
   /** e.g. "capsulefleet.eth" — every capsule is a label under this. */
   parentName: string;
   /**
-   * The origin written into `agent.endpoint` at mint time, and therefore the
-   * URL a booted runner will call for its prompt. On Vercel this is the
-   * deployment's own public URL; it is NOT derivable at runtime in a way we
-   * would want to trust, so it is configured.
+   * The origin written into `agent-endpoint[capsule]` at mint time, and therefore
+   * the URL a booted runner will call for its prompt and its sealed credentials.
+   * On Vercel this is the deployment's own public URL; it is NOT derivable at
+   * runtime in a way we would want to trust, so it is configured.
+   *
+   * It is also the origin of the ENSIP-27 `schema` record, which is the reason a
+   * change here is not free: names already minted point at the old one.
    */
   publicUrl: string;
 };

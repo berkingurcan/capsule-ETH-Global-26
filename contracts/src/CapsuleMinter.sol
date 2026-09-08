@@ -2,18 +2,29 @@
 pragma solidity ^0.8.28;
 
 import {IPermissionedRegistry, IPermissionedResolver} from "./interfaces/IENSv2.sol";
+import {AgentRecords} from "./libraries/AgentRecords.sol";
 
 /// @title CapsuleMinter
 /// @notice Mints one ENSv2 subname per AI agent and wires its permissions in a single
-///         transaction: the name is registered, its config records are written, the owner
-///         is given control of the name's records, and the agent is granted write access
-///         to exactly one key — `agent.heartbeat`.
+///         transaction: the name is registered, its records are written to the agent
+///         ENSIPs, the owner is given control of the name, and the agent is granted write
+///         access to exactly one key — `agent-heartbeat`.
+///
+/// @dev The records follow three standards rather than a schema of our own:
+///
+///      ENSIP-27  `class = Agent`, plus `schema` pointing at a JSON Schema that describes
+///                every key below that no ENSIP defines. Attribute keys are kebab-case
+///                because ENSIP-27 requires it — this is why there are no dots here.
+///      ENSIP-26  `agent-context` and the parameterised `agent-endpoint[<protocol>]`.
+///      ENSIP-25  `agent-registration[<registry>][<agentId>]`, which lets any client
+///                verify that this name really belongs to the agent this contract
+///                registered. See `registrationKey`.
 ///
 /// @dev Why the agent gets one key and not a resolver:
 ///
 /// `PermissionedResolver` scopes write permission per name AND per record key. The agent
-/// can prove it is alive by writing `agent.heartbeat`, and cannot touch `agent.prompt`,
-/// `agent.model` or `agent.endpoint` — so a compromised or prompt-injected agent cannot
+/// can prove it is alive by writing `agent-heartbeat`, and cannot touch `agent-prompt`,
+/// `agent-model` or its endpoints — so a compromised or prompt-injected agent cannot
 /// rewrite its own instructions. That boundary is enforced by ENS, not by our backend.
 ///
 /// @dev Why there is no `halt()` function here:
@@ -21,11 +32,13 @@ import {IPermissionedRegistry, IPermissionedResolver} from "./interfaces/IENSv2.
 /// `mint()` grants the owner `ROLE_SET_TEXT_ADMIN` on their own name, so the owner revokes
 /// the agent by calling the resolver directly:
 ///
-///     resolver.authorizeTextRoles(dnsName, "agent.heartbeat", agent, false)
+///     resolver.authorizeTextRoles(dnsName, "agent-heartbeat", agent, false)
 ///
 /// The kill switch therefore does not depend on this contract existing. If Capsule
 /// disappears tomorrow, every owner keeps control of their agent through ENS alone.
 contract CapsuleMinter {
+    using AgentRecords for string;
+
     ////////////////////////////////////////////////////////////////////////
     // Roles
     ////////////////////////////////////////////////////////////////////////
@@ -54,16 +67,48 @@ contract CapsuleMinter {
     ////////////////////////////////////////////////////////////////////////
     // Record keys
     ////////////////////////////////////////////////////////////////////////
+    //
+    // Spelled once, here, and mirrored in runner/src/records.ts and
+    // web/lib/capsule/records.ts. Keeping them in step is not cosmetic: authorising one
+    // key and writing another does not fail loudly, because `setText` reverts against the
+    // NAME-level resource whichever key was denied. A stale key string is therefore
+    // indistinguishable from a revoked agent. The TypeScript copies are asserted against
+    // these constants in the test suite.
 
-    string public constant KEY_MODEL = "agent.model";
-    string public constant KEY_ENDPOINT = "agent.endpoint";
+    /// @notice ENSIP-27 node classification. Pascal-case, from the recommended vocabulary.
+    string public constant KEY_CLASS = "class";
+    string public constant CLASS_AGENT = "Agent";
+
+    /// @notice ENSIP-27 pointer to the JSON Schema describing the Capsule-specific keys.
+    string public constant KEY_SCHEMA = "schema";
+
+    /// @notice ENSIP-26. Free-form description of the agent, for any client.
+    string public constant KEY_CONTEXT = "agent-context";
+
+    /// @notice ENSIP-26 `agent-endpoint[web]` — the human-facing interface. For a Capsule
+    ///         agent that is its Telegram bot; there is no other UI to point at.
+    string public constant KEY_ENDPOINT_WEB = "agent-endpoint[web]";
+
+    /// @notice `agent-endpoint[capsule]` — the control plane the runner fetches its prompt
+    ///         and its sealed credentials from. Our protocol tag, ENSIP-26's syntax.
+    string public constant KEY_ENDPOINT_CAPSULE = "agent-endpoint[capsule]";
+
+    /// @notice The model the agent runs on. Swapping it on chain is one `setText`.
+    string public constant KEY_MODEL = "agent-model";
+
+    /// @notice Which runtime the capsule supervises. Always `openclaw` today.
+    string public constant KEY_RUNTIME = "agent-runtime";
+    string public constant RUNTIME_OPENCLAW = "openclaw";
 
     /// @dev An opaque pointer such as "cap_8f3d1a", never the prompt itself and never a
     ///      secret. The prompt body and any API keys stay encrypted off-chain.
-    string public constant KEY_PROMPT = "agent.prompt";
+    string public constant KEY_PROMPT = "agent-prompt";
 
     /// @notice The only key the agent may write.
-    string public constant KEY_HEARTBEAT = "agent.heartbeat";
+    string public constant KEY_HEARTBEAT = "agent-heartbeat";
+
+    /// @dev ENSIP-25 requires a non-empty value; the value itself carries no meaning.
+    string internal constant REGISTERED = "1";
 
     ////////////////////////////////////////////////////////////////////////
     // Immutables
@@ -83,14 +128,31 @@ contract CapsuleMinter {
     ///      Dynamic, so it cannot be `immutable`.
     bytes public PARENT_DNS;
 
+    /// @notice This contract as an ERC-7930 interoperable address — the `<registry>` half
+    ///         of every ENSIP-25 key it writes.
+    /// @dev Derived once from `block.chainid` and `address(this)` rather than configured,
+    ///      so it cannot drift from the deployment it describes.
+    string public REGISTRY_ADDRESS_7930;
+
+    /// @notice The `schema` record every capsule carries, per ENSIP-27.
+    string public SCHEMA_URI;
+
     ////////////////////////////////////////////////////////////////////////
     // Types
     ////////////////////////////////////////////////////////////////////////
 
     struct CapsuleConfig {
         string model;
+        /// @dev Base URL of the control plane → `agent-endpoint[capsule]`.
         string endpoint;
         string promptPointer;
+        /// @dev ENSIP-26 `agent-context`. Required: an agent nobody can describe is not
+        ///      discoverable, and this is the one record a generic ENS client will show.
+        string context;
+        /// @dev `https://t.me/<bot>` → `agent-endpoint[web]`. Optional: an owner who has
+        ///      not made their bot yet can add it later, and an empty record is worse
+        ///      than an absent one.
+        string telegramUrl;
     }
 
     event CapsuleMinted(
@@ -108,6 +170,7 @@ contract CapsuleMinter {
     error ZeroAddress();
     error InvalidLabel(string label);
     error MissingResolverRoles();
+    error EmptyContext();
 
     ////////////////////////////////////////////////////////////////////////
     // Construction
@@ -118,13 +181,16 @@ contract CapsuleMinter {
         IPermissionedResolver resolver,
         bytes32 parentNode,
         bytes memory parentDns,
-        uint64 duration
+        uint64 duration,
+        string memory schemaUri
     ) {
         REGISTRY = registry;
         RESOLVER = resolver;
         PARENT_NODE = parentNode;
         PARENT_DNS = parentDns;
         DURATION = duration;
+        SCHEMA_URI = schemaUri;
+        REGISTRY_ADDRESS_7930 = AgentRecords.erc7930Address(block.chainid, address(this));
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -134,12 +200,13 @@ contract CapsuleMinter {
     /// @notice Mint `label.<parent>` as an agent capsule.
     /// @param label The label only, e.g. "trader".
     /// @param owner Receives the name and full control of its resolver records.
-    /// @param agent The agent's own EOA. Gets `agent.heartbeat` write access and nothing else.
+    /// @param agent The agent's own EOA. Gets `agent-heartbeat` write access and nothing else.
     function mint(string calldata label, address owner, address agent, CapsuleConfig calldata config)
         external
         returns (uint256 tokenId, bytes32 node)
     {
         if (owner == address(0) || agent == address(0)) revert ZeroAddress();
+        if (bytes(config.context).length == 0) revert EmptyContext();
 
         bytes memory dnsName = dnsNameOf(label);
         node = nodeOf(label);
@@ -152,13 +219,29 @@ contract CapsuleMinter {
         //    Done before the writes below so a failure here cannot leave a half-owned name.
         RESOLVER.authorizeNameRoles(dnsName, OWNER_NAME_ROLES, owner, true);
 
-        // 3. Write the config. Uses this contract's own root ROLE_SET_TEXT / ROLE_SET_ADDR.
+        // 3. Write the records. Uses this contract's own root ROLE_SET_TEXT / ROLE_SET_ADDR.
         RESOLVER.setAddr(node, agent);
+
+        // Standard first: a client that speaks the ENSIPs and nothing else can read
+        // `class`, follow `schema`, and understand every key that follows.
+        RESOLVER.setText(node, KEY_CLASS, CLASS_AGENT);
+        RESOLVER.setText(node, KEY_SCHEMA, SCHEMA_URI);
+        RESOLVER.setText(node, KEY_CONTEXT, config.context);
+        RESOLVER.setText(node, KEY_ENDPOINT_CAPSULE, config.endpoint);
+        if (bytes(config.telegramUrl).length != 0) {
+            RESOLVER.setText(node, KEY_ENDPOINT_WEB, config.telegramUrl);
+        }
+
+        // Then ours, as declared by that schema.
         RESOLVER.setText(node, KEY_MODEL, config.model);
-        RESOLVER.setText(node, KEY_ENDPOINT, config.endpoint);
+        RESOLVER.setText(node, KEY_RUNTIME, RUNTIME_OPENCLAW);
         RESOLVER.setText(node, KEY_PROMPT, config.promptPointer);
 
-        // 4. The agent may write exactly one key.
+        // 4. ENSIP-25: this name is the agent registered here under this token id.
+        //    Written last because the key contains the token id, which step 1 produced.
+        RESOLVER.setText(node, registrationKey(tokenId), REGISTERED);
+
+        // 5. The agent may write exactly one key.
         RESOLVER.authorizeTextRoles(dnsName, KEY_HEARTBEAT, agent, true);
 
         emit CapsuleMinted(
@@ -172,6 +255,26 @@ contract CapsuleMinter {
             config.promptPointer,
             expiry
         );
+    }
+
+    ////////////////////////////////////////////////////////////////////////
+    // ENSIP-25
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice The ENSIP-25 verification key for the agent registered under `tokenId`.
+    ///
+    /// @dev ENSIP-25 asks a registry to document how a verifier obtains both halves of the
+    ///      key. For Capsule:
+    ///
+    ///        <agentId>   the `tokenId` returned by `mint()`, also carried by
+    ///                    `CapsuleMinted`, in decimal.
+    ///        <registry>  this contract, ERC-7930 encoded — `REGISTRY_ADDRESS_7930`.
+    ///
+    ///      Resolve this key on the claimed name through `UniversalResolverV2`. A
+    ///      non-empty value verifies the claim; a missing or empty record fails it. ENS
+    ///      ownership can change afterwards, so it is a statement about now.
+    function registrationKey(uint256 tokenId) public view returns (string memory) {
+        return AgentRecords.registrationKey(REGISTRY_ADDRESS_7930, tokenId);
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -205,7 +308,7 @@ contract CapsuleMinter {
         return uint256(keccak256(abi.encode(node, keccak256(bytes(key)))));
     }
 
-    /// @notice Whether `agent` can currently write `agent.heartbeat` on `label`.
+    /// @notice Whether `agent` can currently write `agent-heartbeat` on `label`.
     /// @dev The frontend's live "is this capsule running?" check.
     function isAgentAuthorized(string calldata label, address agent) external view returns (bool) {
         return RESOLVER.hasRoles(textResourceOf(nodeOf(label), KEY_HEARTBEAT), ROLE_SET_TEXT, agent);

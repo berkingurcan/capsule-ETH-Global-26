@@ -9,7 +9,19 @@ import Sparkline from "./Sparkline";
 import LogStream from "./LogStream";
 import RecallDialog from "./RecallDialog";
 import ChainTag from "./ChainTag";
-import { PAYMENTS, fullName, usd, type Agent } from "@/lib/mock";
+import { fullName, type Agent } from "@/lib/mock";
+import {
+  KEY_CONTEXT,
+  KEY_ENDPOINT_CAPSULE,
+  KEY_ENDPOINT_WEB,
+  KEY_HEARTBEAT,
+  KEY_MODEL,
+  KEY_PROMPT,
+  KEY_RUNTIME,
+  KEY_SCHEMA,
+  SCHEMA_PATH,
+  WRITER,
+} from "@/lib/capsule/records";
 
 type Row = { key: string; value: string; writer: "owner" | "agent"; editable?: boolean };
 
@@ -17,22 +29,26 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
   const [dead, setDead] = useState(agent.status === "recalled");
   const [dialog, setDialog] = useState(false);
   const [prompt, setPrompt] = useState(agent.prompt);
-  const [price, setPrice] = useState(agent.price);
   const [editing, setEditing] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
 
   const status = dead ? ("recalled" as const) : agent.status;
   const name = fullName(agent);
 
+  // `writer` is not this component's opinion. CapsuleMinter grants the owner name-wide
+  // resolver roles and grants the agent ROLE_SET_TEXT on exactly one key, so WRITER is a
+  // readout of the EAC grants — which is why this table can assert rather than hedge.
   const rows: Row[] = [
     { key: "addr", value: agent.addr.slice(0, 10) + "…" + agent.addr.slice(-4), writer: "owner" },
-    { key: "agent.model", value: agent.model, writer: "owner" },
-    { key: "agent.tools", value: agent.tools.join(","), writer: "owner" },
-    { key: "agent.prompt", value: prompt, writer: "owner", editable: true },
-    { key: "agent.endpoint", value: agent.endpoint, writer: "owner" },
-    { key: "agent.price", value: price, writer: "owner", editable: true },
-    { key: "agent.heartbeat", value: "1757001600", writer: "agent" },
-    { key: "agent.secrets", value: agent.secretsRef, writer: "owner" },
+    { key: "class", value: "Agent", writer: WRITER["class"] },
+    { key: KEY_SCHEMA, value: SCHEMA_PATH, writer: WRITER[KEY_SCHEMA] },
+    { key: KEY_CONTEXT, value: agent.context, writer: WRITER[KEY_CONTEXT] },
+    { key: KEY_MODEL, value: agent.model, writer: WRITER[KEY_MODEL] },
+    { key: KEY_RUNTIME, value: agent.runtime, writer: WRITER[KEY_RUNTIME] },
+    { key: KEY_PROMPT, value: prompt, writer: WRITER[KEY_PROMPT], editable: true },
+    { key: KEY_ENDPOINT_CAPSULE, value: agent.endpoint, writer: WRITER[KEY_ENDPOINT_CAPSULE] },
+    { key: KEY_ENDPOINT_WEB, value: "https://t.me/" + agent.telegram.replace("@", ""), writer: WRITER[KEY_ENDPOINT_WEB] },
+    { key: KEY_HEARTBEAT, value: "beat-" + agent.beats, writer: WRITER[KEY_HEARTBEAT] },
   ];
 
   function save(key: string) {
@@ -40,8 +56,6 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
     setSaved(key);
     setTimeout(() => setSaved(null), 2600);
   }
-
-  const mine = PAYMENTS.filter((p) => p.from === name || p.to === name);
 
   return (
     <main className="page">
@@ -115,10 +129,8 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
                               <input
                                 className="input"
                                 autoFocus
-                                value={r.key === "agent.prompt" ? prompt : price}
-                                onChange={(e) =>
-                                  r.key === "agent.prompt" ? setPrompt(e.target.value) : setPrice(e.target.value)
-                                }
+                                value={prompt}
+                                onChange={(e) => setPrompt(e.target.value)}
                               />
                               <button className="btn btn-sm btn-mint" onClick={() => save(r.key)}>
                                 Write
@@ -156,8 +168,10 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
               <div className="notice paper" style={{ border: 0, borderTop: "3px solid var(--ink)", borderRadius: 0 }}>
                 <span className="tag ink">Note</span>
                 <p style={{ margin: 0 }}>
-                  <span className="mono">agent.heartbeat</span> is the only key the agent holds a role on. Every other
-                  row is yours. Edit one and the runner picks it up on its next 30-second read — no redeploy.
+                  <span className="mono">agent-heartbeat</span> is the only key the agent holds a role on — not by
+                  convention, but because <span className="mono">authorizeTextRoles</span> granted that one key and no
+                  other. Every other row is yours. Edit one and the supervisor rewrites the gateway&rsquo;s workspace
+                  and restarts it on its next 30-second read — no redeploy.
                 </p>
               </div>
             </div>
@@ -176,8 +190,8 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
                 <Sparkline points={agent.history} broken={dead} />
                 <p className="hint" style={{ marginTop: 8 }}>
                   {dead
-                    ? "Flat at 60 seconds, then the line stops at the revoke. No gap before it — this was a recall, not a crash."
-                    : "Flat at 60 seconds. A gap here is the first sign an agent is in trouble."}
+                    ? "Flat at the configured interval, then the line stops at the revoke. No gap before it — this was a recall, not a crash."
+                    : "Flat at the configured interval — 60s here, 8h in production. A gap is the first sign an agent is in trouble."}
                 </p>
               </div>
             </div>
@@ -206,62 +220,50 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
 
             <div className="panel" style={{ overflow: "hidden" }}>
               <div className="row" style={{ padding: "14px 20px", background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
-                <span className="label">Money</span>
+                <span className="label">OpenClaw gateway</span>
                 <span className="push">
-                  <ChainTag chain="base" />
+                  {dead ? (
+                    <span className="pill quiet">stopped</span>
+                  ) : (
+                    <span className="pill run">
+                      <span className="led" />
+                      up
+                    </span>
+                  )}
                 </span>
               </div>
               <div style={{ padding: "16px 20px" }}>
-                <div className="row" style={{ gap: 20, marginBottom: 14 }}>
-                  <div>
-                    <div className="label">Held</div>
-                    <div className="figure" style={{ fontSize: 22 }}>
-                      {usd(agent.balance)}
+                <p className="hint" style={{ margin: "0 0 14px" }}>
+                  Everything below was written by the supervisor from the records above. The gateway holds no key and
+                  makes no chain call — it does not know ENS exists.
+                </p>
+                <div className="stack">
+                  {[
+                    ["openclaw.json", dead ? "—" : "channels.telegram · " + agent.telegram],
+                    ["AGENTS.md", agent.secretsRef + " · the prompt body, unsealed at boot"],
+                    ["IDENTITY.md", name + " · and what it may not change"],
+                    ["model", agent.model],
+                  ].map(([k, v]) => (
+                    <div key={k} className="kv" style={{ padding: "10px 0" }}>
+                      <span className="hint mono" style={{ fontSize: 12 }}>
+                        {k}
+                      </span>
+                      <span
+                        className="mono"
+                        style={{ fontSize: 12.5, fontWeight: 600, textAlign: "right", wordBreak: "break-all" }}
+                      >
+                        {v}
+                      </span>
                     </div>
-                  </div>
-                  <div>
-                    <div className="label">Earned</div>
-                    <div className="figure" style={{ fontSize: 22, color: "var(--mint-700)" }}>
-                      {usd(agent.earned)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="label">Spent</div>
-                    <div className="figure" style={{ fontSize: 22 }}>
-                      {usd(agent.spent)}
-                    </div>
-                  </div>
+                  ))}
                 </div>
-                {mine.length === 0 ? (
-                  <p className="hint" style={{ margin: 0 }}>
-                    No paid calls yet.
+                <div className="notice sun" style={{ marginTop: 14 }}>
+                  <span className="tag ink">Recall</span>
+                  <p style={{ margin: 0 }}>
+                    Pulling the heartbeat role stops this gateway before the runner exits, so the bot stops answering
+                    within one tick. A kill switch that does not reach Telegram is not one.
                   </p>
-                ) : (
-                  <div className="stack">
-                    {mine.map((p) => (
-                      <div key={p.id} className="row" style={{ padding: "10px 0", gap: 10 }}>
-                        <span
-                          className="tag"
-                          style={{
-                            background: p.to === name ? "var(--mint)" : "var(--bubble)",
-                            color: "var(--ink)",
-                          }}
-                        >
-                          {p.to === name ? "in" : "out"}
-                        </span>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.reason}</div>
-                          <div className="hint mono" style={{ fontSize: 11 }}>
-                            {p.at} · {p.tx}
-                          </div>
-                        </div>
-                        <span className="figure push" style={{ fontSize: 14 }}>
-                          {usd(p.amount)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
+                </div>
               </div>
             </div>
           </div>

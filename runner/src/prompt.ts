@@ -1,7 +1,7 @@
 /**
  * Turning the pointer on the name into the instructions off it.
  *
- * `agent.prompt` is "cap_8f3d1a" — a claim check. The body it stands for lives
+ * `agent-prompt` is "cap_8f3d1a" — a claim check. The body it stands for lives
  * off chain, and this is the cloakroom.
  *
  * The interesting part is how the service decides whether to hand it over. The
@@ -49,7 +49,7 @@ export type Signer = {
 };
 
 export type FetchPromptArgs = {
-  /** Base URL — from `agent.endpoint`, or the announced dev override. */
+  /** Base URL — from `agent-endpoint[capsule]`, or the announced dev override. */
   endpoint: string;
   name: string;
   promptRef: string;
@@ -115,7 +115,7 @@ export async function fetchPrompt(args: FetchPromptArgs): Promise<Secret<string>
 /**
  * Keyed on the pointer and nothing else.
  *
- * The loop re-reads the name every tick. When `agent.prompt` still says
+ * The loop re-reads the name every tick. When `agent-prompt` still says
  * cap_8f3d1a there is nothing to fetch; when the owner changes it on chain the
  * next tick fetches a different body and the agent becomes a different agent
  * without a redeploy. That is the whole "change the record, change the agent"

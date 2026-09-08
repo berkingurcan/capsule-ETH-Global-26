@@ -4,9 +4,16 @@ import { useEffect, useRef, useState } from "react";
 import Capsule from "./Capsule";
 import { fullName, type Agent } from "@/lib/mock";
 
-/* The master override. One call — revokeRoles() — and the agent's next
-   heartbeat write reverts with EACUnauthorizedAccountRoles. The runner
-   reads that revert as its own stop signal. Nothing else is torn down. */
+/* The master override. One call — authorizeTextRoles(…, false) on the owner's
+   own resolver — and the agent's next heartbeat write reverts with
+   EACUnauthorizedAccountRoles. The runner reads that revert as its own stop
+   signal, stops the OpenClaw gateway and exits 0. Nothing else is torn down.
+
+   Note what this call is NOT: it is not a function on CapsuleMinter. mint()
+   grants the owner ROLE_SET_TEXT_ADMIN on their own name, so recall goes
+   straight to the resolver. If Capsule disappears tomorrow the owner still
+   holds the switch, through ENS alone — which is the whole argument, and the
+   reason this dialog shows the resolver call rather than one of ours. */
 
 type Phase = "confirm" | "signing" | "done";
 
@@ -48,7 +55,7 @@ export default function RecallDialog({
             Master override
           </span>
           <span className="push mono" style={{ fontSize: 12 }}>
-            revokeRoles()
+            authorizeTextRoles()
           </span>
         </div>
 
@@ -69,8 +76,9 @@ export default function RecallDialog({
               </div>
 
               <p style={{ margin: "0 0 16px", fontSize: 15 }}>
-                This pulls the one role the agent holds on its own name. Its next heartbeat write reverts, and the
-                runner exits on that revert. It happens within 60 seconds.
+                This pulls the one role the agent holds on its own name. The runner probes that permission every 30
+                seconds for free, so the refusal lands on the next tick: the gateway stops, the Telegram bot goes
+                quiet, and the process exits 0.
               </p>
 
               <div className="panel flat shell" style={{ padding: "14px 18px", marginBottom: 18 }}>
@@ -124,11 +132,15 @@ export default function RecallDialog({
               <div className="label">Waiting on your wallet</div>
               <pre className="term">
                 <span className="d">→ </span>
-                <span className="w">CapsuleMinter.recall(</span>
-                <span className="y">{name}</span>
-                <span className="w">)</span>
+                <span className="w">resolver.authorizeTextRoles(</span>
                 {"\n"}
-                <span className="d">  revokeRoles(resource, agent, ROLE_HEARTBEAT)</span>
+                <span className="d">    </span>
+                <span className="y">{name}</span>
+                <span className="d">, </span>
+                <span className="y">&quot;agent-heartbeat&quot;</span>
+                <span className="d">, agent, </span>
+                <span className="r">false</span>
+                <span className="w">)</span>
                 {"\n"}
                 <span className="d">  waiting for signature…</span>
                 <span className="caret" />
@@ -149,17 +161,17 @@ export default function RecallDialog({
                 </div>
               </div>
               <pre className="term">
-                <span className="g">✓ revokeRoles</span> <span className="d">confirmed</span>
+                <span className="g">✓ authorizeTextRoles</span> <span className="d">confirmed</span>
                 {"\n"}
                 <span className="d">runner </span>
                 <span className="w">{name}</span>
                 {"\n"}
-                <span className="d">  setText(agent.heartbeat) → </span>
+                <span className="d">  setText(agent-heartbeat) → </span>
                 <span className="r">EACUnauthorizedAccountRoles</span>
                 {"\n"}
                 <span className="d">  permission gone — halting</span>
                 {"\n"}
-                <span className="d">  telegram bot closed · exit 0</span>
+                <span className="d">  openclaw gateway stopped · exit 0</span>
               </pre>
               <button
                 className="btn btn-primary"

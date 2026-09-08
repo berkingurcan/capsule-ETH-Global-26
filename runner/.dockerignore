@@ -11,6 +11,10 @@ node_modules
 .git
 .gitignore
 
+# Built by the image itself, from source. A dist/ compiled on the host would
+# shadow it with whatever the host last happened to build.
+dist
+
 # Scaffolding for local development. The agent's image has no business
 # carrying the prompt service it talks to.
 dev

@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 
-/* The agent writes agent.heartbeat to its own name every 60 seconds.
+/* The agent writes agent-heartbeat to its own name on its heartbeat interval.
    That write is the thing the EAC role gates — so this counter is not
    decoration, it is the agent proving it still holds permission. */
 

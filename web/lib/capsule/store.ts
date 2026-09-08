@@ -67,7 +67,7 @@ export type StoredPrompt = {
 /**
  * Seals a prompt and returns the pointer to write on chain.
  *
- * Called before the mint, because `mint()` writes agent.prompt in the same
+ * Called before the mint, because `mint()` writes agent-prompt in the same
  * transaction that creates the name. The row is therefore unreachable until
  * the mint lands: the prompt service authorises against the name's addr
  * record, which does not resolve yet. No extra state is needed to express
@@ -197,5 +197,131 @@ export async function readAgent(
     capsuleName: row.capsule_name,
     address: row.agent_address as Address,
     privateKey,
+  };
+}
+
+////////////////////////////////////////////////////////////////////////////
+// Runtime credentials
+////////////////////////////////////////////////////////////////////////////
+//
+// What OpenClaw needs and the chain must never carry: the owner's Telegram bot token and
+// a model provider API key. Sealed here, handed down over the signed `/api/runtime`
+// request, and never written to a text record — an ENS record is published to everyone,
+// permanently, and a leaked bot token needs a revocation that a record cannot give.
+
+export type CredentialKind = "telegram-bot-token" | "model-api-key";
+
+export type RuntimeSettings = {
+  capsuleName: string;
+  /** Decides which environment variable the gateway is handed. e.g. "anthropic". */
+  modelProvider: string;
+  /** Numeric Telegram user ids permitted to DM the bot. Never empty in practice. */
+  telegramAllowFrom: string[];
+};
+
+export type RuntimeBundle = RuntimeSettings & {
+  telegramBotToken: string;
+  modelApiKey: string;
+};
+
+/**
+ * Writes one credential, replacing any previous value for that capsule and kind.
+ *
+ * Upsert rather than append-only, unlike prompts. A prompt is append-only because the
+ * pointer to the live one lives on chain and changing it should cost the owner a
+ * transaction they can be audited on. A credential has no on-chain pointer: rotating a
+ * leaked bot token has to be immediate and free, or it does not happen.
+ */
+export async function putCredential(
+  store: Store,
+  args: { capsuleName: string; kind: CredentialKind; value: string },
+): Promise<void> {
+  const capsuleName = args.capsuleName.toLowerCase();
+  if (args.value.trim() === "") throw new StoreError(`${args.kind} is empty`);
+
+  const sealed = seal(store.key, args.value, aad.credential(capsuleName, args.kind));
+
+  await store.sql`
+    insert into capsule_credential (capsule_name, kind, value_sealed)
+    values (${capsuleName}, ${args.kind}, ${sealed})
+    on conflict (capsule_name, kind)
+      do update set value_sealed = excluded.value_sealed, updated_at = now()
+  `;
+}
+
+export async function putRuntimeSettings(store: Store, args: RuntimeSettings): Promise<void> {
+  const capsuleName = args.capsuleName.toLowerCase();
+  if (args.modelProvider.trim() === "") throw new StoreError("modelProvider is empty");
+
+  // Refused here rather than at the edge, because this is the last place that can refuse
+  // it. An empty allowlist produces a bot any stranger can DM, which is a prompt-injection
+  // surface ENS cannot defend — the injected instruction never touches a record.
+  if (args.telegramAllowFrom.length === 0) {
+    throw new StoreError("telegramAllowFrom is empty — a bot anyone can DM is not launchable");
+  }
+  if (args.telegramAllowFrom.some((id) => !/^\d+$/.test(id))) {
+    throw new StoreError("telegramAllowFrom must be numeric Telegram user ids");
+  }
+
+  await store.sql`
+    insert into capsule_runtime (capsule_name, model_provider, telegram_allow_from)
+    values (${capsuleName}, ${args.modelProvider}, ${args.telegramAllowFrom})
+    on conflict (capsule_name)
+      do update set
+        model_provider = excluded.model_provider,
+        telegram_allow_from = excluded.telegram_allow_from,
+        updated_at = now()
+  `;
+}
+
+/**
+ * Everything a booting runner needs, in one round trip.
+ *
+ * Returns null when any part is missing rather than a partial bundle. A runner given a
+ * bot token but no model key would start a gateway that answers Telegram messages with
+ * provider errors — worse than not starting, because it looks alive on the dashboard.
+ */
+export async function readRuntimeBundle(
+  store: Store,
+  args: { capsuleName: string },
+): Promise<RuntimeBundle | null> {
+  const capsuleName = args.capsuleName.toLowerCase();
+
+  // One round trip's latency, two statements. A booting runner is holding a Telegram
+  // connection open while this runs.
+  const [credentialRows, settingsRows] = await Promise.all([
+    store.sql`
+      select kind, value_sealed
+      from capsule_credential
+      where capsule_name = ${capsuleName}
+    `,
+    store.sql`
+      select capsule_name, model_provider, telegram_allow_from
+      from capsule_runtime
+      where capsule_name = ${capsuleName}
+    `,
+  ]);
+
+  const credentials = credentialRows as { kind: string; value_sealed: string }[];
+  const settings = settingsRows as {
+    capsule_name: string;
+    model_provider: string;
+    telegram_allow_from: string[];
+  }[];
+
+  const settingsRow = settings[0];
+  if (settingsRow === undefined) return null;
+
+  const sealedByKind = new Map(credentials.map((row) => [row.kind, row.value_sealed]));
+  const telegramSealed = sealedByKind.get("telegram-bot-token");
+  const modelSealed = sealedByKind.get("model-api-key");
+  if (telegramSealed === undefined || modelSealed === undefined) return null;
+
+  return {
+    capsuleName: settingsRow.capsule_name,
+    modelProvider: settingsRow.model_provider,
+    telegramAllowFrom: settingsRow.telegram_allow_from,
+    telegramBotToken: open(store.key, telegramSealed, aad.credential(capsuleName, "telegram-bot-token")),
+    modelApiKey: open(store.key, modelSealed, aad.credential(capsuleName, "model-api-key")),
   };
 }

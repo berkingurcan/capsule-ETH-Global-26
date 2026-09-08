@@ -118,10 +118,18 @@ contract CapsuleMinterTest is Test {
     bytes constant PARENT_DNS = hex"0c63617073756c65666c6565740365746800";
     bytes32 constant TRADER_NODE = 0x66a9d2f8c0624c05f62f7b4767380c0ed5de24b18e2ac582cb30b03fc9483648;
     bytes constant TRADER_DNS = hex"067472616465720c63617073756c65666c6565740365746800";
-    uint256 constant RES_HEARTBEAT =
+    // Read off the live chain on 2026-09-06, when the keys still carried dots. Kept
+    // verbatim: they verify the RESOURCE ENCODING against values a real resolver
+    // produced, and that encoding did not change when the key strings did. The current
+    // keys are checked against these same helpers below.
+    uint256 constant RES_LEGACY_HEARTBEAT =
         0xcdd52bc15022b496e667b6080c8dabdc31b08834f7ee1578a06d0f6ea10a12b3;
-    uint256 constant RES_PROMPT =
+    uint256 constant RES_LEGACY_PROMPT =
         0xd8a52b4557d07167799f053cf68321bfe369ee7a8a957f50404c60e716abfbba;
+
+    string constant SCHEMA_URI = "https://capsule.dev/schema/capsule-agent-v1.json";
+    string constant CONTEXT = "Trading agent for capsulefleet.eth. Talk to it on Telegram.";
+    string constant TELEGRAM = "https://t.me/capsule_trader_bot";
 
     address constant OWNER = address(0xB0B);
     address constant AGENT = 0xca266f69EE3EFed7eC71CE5062f5A07c18908905;
@@ -138,7 +146,8 @@ contract CapsuleMinterTest is Test {
             IPermissionedResolver(address(resolver)),
             PARENT_NODE,
             PARENT_DNS,
-            90 days
+            90 days,
+            SCHEMA_URI
         );
         resolver.grantRootRoles(minter.REQUIRED_RESOLVER_ROOT_ROLES(), address(minter));
     }
@@ -154,8 +163,18 @@ contract CapsuleMinterTest is Test {
     }
 
     function test_textResourceOf_matchesLiveChain() public view {
-        assertEq(minter.textResourceOf(TRADER_NODE, "agent.heartbeat"), RES_HEARTBEAT);
-        assertEq(minter.textResourceOf(TRADER_NODE, "agent.prompt"), RES_PROMPT);
+        assertEq(minter.textResourceOf(TRADER_NODE, "agent.heartbeat"), RES_LEGACY_HEARTBEAT);
+        assertEq(minter.textResourceOf(TRADER_NODE, "agent.prompt"), RES_LEGACY_PROMPT);
+    }
+
+    /// @dev The rename is not cosmetic to the resolver: a per-key resource is derived from
+    ///      the key string, so `agent-heartbeat` and `agent.heartbeat` are two different
+    ///      permissions. A name minted by the old contract does not authorise the new one.
+    function test_textResourceOf_kebabKeysAreDifferentResources() public view {
+        assertTrue(
+            minter.textResourceOf(TRADER_NODE, minter.KEY_HEARTBEAT()) != RES_LEGACY_HEARTBEAT,
+            "renaming a key must move its resource, or the rename authorised nothing"
+        );
     }
 
     function test_dnsNameOf_rejectsEmptyLabel() public {
@@ -176,7 +195,13 @@ contract CapsuleMinterTest is Test {
             "trader",
             OWNER,
             AGENT,
-            CapsuleMinter.CapsuleConfig("claude-opus-5", "https://api.capsule.dev/trader", "cap_8f3d1a")
+            CapsuleMinter.CapsuleConfig(
+                "claude-opus-5",
+                "https://api.capsule.dev/trader",
+                "cap_8f3d1a",
+                CONTEXT,
+                TELEGRAM
+            )
         );
     }
 
@@ -193,11 +218,119 @@ contract CapsuleMinterTest is Test {
 
     function test_mint_writesConfigRecords() public {
         _mint();
-        assertEq(resolver.text(TRADER_NODE, "agent.model"), "claude-opus-5");
-        assertEq(resolver.text(TRADER_NODE, "agent.endpoint"), "https://api.capsule.dev/trader");
-        assertEq(resolver.text(TRADER_NODE, "agent.prompt"), "cap_8f3d1a");
+        assertEq(resolver.text(TRADER_NODE, "agent-model"), "claude-opus-5");
+        assertEq(resolver.text(TRADER_NODE, "agent-endpoint[capsule]"), "https://api.capsule.dev/trader");
+        assertEq(resolver.text(TRADER_NODE, "agent-prompt"), "cap_8f3d1a");
+        assertEq(resolver.text(TRADER_NODE, "agent-runtime"), "openclaw");
         assertEq(resolver.addrs(TRADER_NODE), AGENT);
-        assertEq(resolver.writtenKeyCount(), 3, "mint must not write agent.heartbeat itself");
+        assertEq(
+            resolver.text(TRADER_NODE, "agent-heartbeat"),
+            "",
+            "mint must not write the heartbeat: the first beat is the agent proving itself"
+        );
+    }
+
+    /// @notice ENSIP-27: a client that has never heard of Capsule can still tell what this
+    ///         node is, and find the schema describing the keys no ENSIP defines.
+    function test_mint_writesEnsip27Classification() public {
+        _mint();
+        assertEq(resolver.text(TRADER_NODE, "class"), "Agent");
+        assertEq(resolver.text(TRADER_NODE, "schema"), SCHEMA_URI);
+    }
+
+    /// @notice ENSIP-26: the description and the protocol-parameterised endpoints.
+    function test_mint_writesEnsip26AgentRecords() public {
+        _mint();
+        assertEq(resolver.text(TRADER_NODE, "agent-context"), CONTEXT);
+        assertEq(resolver.text(TRADER_NODE, "agent-endpoint[web]"), TELEGRAM);
+    }
+
+    /// @dev An owner without a bot yet gets no `agent-endpoint[web]` record at all. An
+    ///      empty string would resolve as a present-but-blank endpoint, which a client
+    ///      cannot distinguish from a broken one.
+    function test_mint_omitsWebEndpointWhenNoBot() public {
+        minter.mint(
+            "trader",
+            OWNER,
+            AGENT,
+            CapsuleMinter.CapsuleConfig("m", "https://e", "cap_1", CONTEXT, "")
+        );
+        assertEq(resolver.text(TRADER_NODE, "agent-endpoint[web]"), "");
+        assertEq(resolver.writtenKeyCount(), 8, "one fewer write than a capsule with a bot");
+    }
+
+    /// @notice ENSIP-25: the name carries a verifiable claim that this contract registered
+    ///         it, keyed by the registry's ERC-7930 address and the token id.
+    function test_mint_writesEnsip25Registration() public {
+        (uint256 tokenId,) = _mint();
+        string memory key = minter.registrationKey(tokenId);
+        assertEq(resolver.text(TRADER_NODE, key), "1", "ENSIP-25 requires a non-empty value");
+    }
+
+    /// @dev The registry half of that key is derived from the chain the contract is on, so
+    ///      the same source deployed to Sepolia produces a Sepolia key without configuration.
+    function test_registrationKey_carriesTheDeployedChain() public {
+        vm.chainId(11155111);
+        CapsuleMinter sepolia = new CapsuleMinter(
+            IPermissionedRegistry(address(registry)),
+            IPermissionedResolver(address(resolver)),
+            PARENT_NODE,
+            PARENT_DNS,
+            90 days,
+            SCHEMA_URI
+        );
+        assertTrue(
+            _startsWith(sepolia.REGISTRY_ADDRESS_7930(), "0x0001000003aa36a714"),
+            "version, eip155 chain type, 3-byte 0xaa36a7 reference, 20-byte address"
+        );
+        assertEq(bytes(sepolia.REGISTRY_ADDRESS_7930()).length, 2 + 18 + 40);
+        assertTrue(_startsWith(sepolia.registrationKey(42), "agent-registration[0x0001000003aa36a714"));
+    }
+
+    /// @dev ENSIP-27 requires kebab-case attribute keys. This is the check that catches a
+    ///      dot creeping back in, in any of the keys, from any direction.
+    function test_everyKeyIsKebabCase() public view {
+        string[8] memory keys = [
+            minter.KEY_CLASS(),
+            minter.KEY_SCHEMA(),
+            minter.KEY_CONTEXT(),
+            minter.KEY_ENDPOINT_WEB(),
+            minter.KEY_ENDPOINT_CAPSULE(),
+            minter.KEY_MODEL(),
+            minter.KEY_RUNTIME(),
+            minter.KEY_PROMPT()
+        ];
+        for (uint256 i = 0; i < keys.length; i += 1) {
+            _assertKebab(keys[i]);
+        }
+        _assertKebab(minter.KEY_HEARTBEAT());
+    }
+
+    function _assertKebab(string memory key) internal pure {
+        bytes memory b = bytes(key);
+        assertTrue(b.length > 0);
+        for (uint256 i = 0; i < b.length; i += 1) {
+            bytes1 c = b[i];
+            bool ok = (c >= "a" && c <= "z") || c == "-" || c == "[" || c == "]";
+            assertTrue(ok, string.concat("not kebab-case: ", key));
+        }
+    }
+
+    function _startsWith(string memory value, string memory prefix) internal pure returns (bool) {
+        bytes memory v = bytes(value);
+        bytes memory p = bytes(prefix);
+        if (v.length < p.length) return false;
+        for (uint256 i = 0; i < p.length; i += 1) {
+            if (v[i] != p[i]) return false;
+        }
+        return true;
+    }
+
+    /// @dev An agent nobody can describe is not discoverable, and `agent-context` is the
+    ///      one record a generic ENS client will surface.
+    function test_mint_requiresContext() public {
+        vm.expectRevert(CapsuleMinter.EmptyContext.selector);
+        minter.mint("trader", OWNER, AGENT, CapsuleMinter.CapsuleConfig("m", "e", "p", "", ""));
     }
 
     function test_mint_grantsOwnerNameControl() public {
@@ -210,18 +343,23 @@ contract CapsuleMinterTest is Test {
     /// @dev The core claim of the project.
     function test_mint_grantsAgentHeartbeatOnly() public {
         _mint();
-        assertEq(resolver.lastTextAuthKey(), "agent.heartbeat");
+        assertEq(resolver.lastTextAuthKey(), "agent-heartbeat");
         assertEq(resolver.lastTextAuthAccount(), AGENT);
         assertTrue(resolver.lastTextAuthGrant());
         assertEq(resolver.lastTextAuthName(), TRADER_DNS, "authorize takes DNS wire format, not a namehash");
 
         assertTrue(minter.isAgentAuthorized("trader", AGENT));
-        assertFalse(resolver.hasRoles(RES_PROMPT, 1 << 4, AGENT), "agent must not be able to rewrite its prompt");
+        assertFalse(
+            resolver.hasRoles(minter.textResourceOf(TRADER_NODE, minter.KEY_PROMPT()), 1 << 4, AGENT),
+            "agent must not be able to rewrite its prompt"
+        );
     }
 
     function test_mint_rejectsZeroAgent() public {
         vm.expectRevert(CapsuleMinter.ZeroAddress.selector);
-        minter.mint("trader", OWNER, address(0), CapsuleMinter.CapsuleConfig("m", "e", "p"));
+        minter.mint(
+            "trader", OWNER, address(0), CapsuleMinter.CapsuleConfig("m", "e", "p", CONTEXT, "")
+        );
     }
 
     function test_checkResolverRoles() public view {
@@ -234,7 +372,8 @@ contract CapsuleMinterTest is Test {
             IPermissionedResolver(address(resolver)),
             PARENT_NODE,
             PARENT_DNS,
-            90 days
+            90 days,
+            SCHEMA_URI
         );
         vm.expectRevert(CapsuleMinter.MissingResolverRoles.selector);
         fresh.checkResolverRoles();

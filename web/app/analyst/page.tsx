@@ -4,17 +4,20 @@ import { useEffect, useRef, useState } from "react";
 import Capsule from "@/components/Capsule";
 import { ANSWERS, type Answer } from "@/lib/mock";
 
-/* The fleet analyst: a Subgraph MCP server over both subgraphs, asked in
+/* The fleet analyst: a Subgraph MCP server over the Sepolia subgraph, asked in
    plain language. The point of the track is the reasoning, not the rows —
-   so every answer leads with a sentence and shows its query underneath. */
+   so every answer leads with a sentence and shows its query underneath.
+
+   One subgraph, not two: the Base leg went with x402 on 2026-09-08. What is
+   left is the more interesting half anyway — who changed what, and who was
+   allowed to. */
 
 const QUERIES = [
   `{ records(where: { day: "today" }) {
     name  key  writer  txHash
 } }`,
-  `{ agents { name
-    earned: transfersTo(currency: "USDC")
-    spent:  transfersFrom(currency: "USDC")
+  `{ textChanges(where: { writer_not: OWNER }) {
+    name  key  writer  refused
 } }`,
   `{ heartbeats(orderBy: time) { name  time }
    roleRevokes { name  time  by } }`,
@@ -27,7 +30,7 @@ export default function AnalystPage() {
     {
       who: "analyst",
       text:
-        "I read both subgraphs — names, roles and heartbeats on Sepolia, USDC on Base. Ask me about the fleet in plain language.",
+        "I read the Sepolia subgraph — names, records, roles and heartbeats. Ask me about the fleet in plain language.",
     },
     { who: "you", text: ANSWERS[2].q },
     { who: "analyst", text: ANSWERS[2].a, answer: ANSWERS[2], query: QUERIES[2] },
@@ -76,8 +79,8 @@ export default function AnalystPage() {
           </p>
           <h2 style={{ fontSize: 32, marginTop: 6 }}>Ask what the fleet did.</h2>
           <p className="hint" style={{ marginTop: 6, maxWidth: "68ch" }}>
-            A Subgraph MCP server sits over both subgraphs. It answers in sentences and shows the query it ran, so you
-            can check it.
+            A Subgraph MCP server sits over the fleet subgraph. It answers in sentences and shows the query it ran, so
+            you can check it.
           </p>
         </div>
 
@@ -90,7 +93,7 @@ export default function AnalystPage() {
                 capsule-analyst
               </span>
               <span className="push mono" style={{ fontSize: 11, color: "var(--vend-300)" }}>
-                2 subgraphs · MCP
+                subgraph · MCP
               </span>
             </div>
 
@@ -163,7 +166,7 @@ export default function AnalystPage() {
                     querying
                   </span>
                   <span className="hint mono" style={{ fontSize: 12 }}>
-                    reading subgraph-sepolia, subgraph-base…
+                    reading subgraph-sepolia…
                   </span>
                 </div>
               )}

@@ -50,7 +50,14 @@ async function main() {
   console.log(`   resolver   ${config.resolver}`);
   console.log(`✅ addr       ${short(config.agent)} (matches AGENT_ADDRESS)`);
   console.log(`✅ model      ${config.model}`);
-  console.log(`✅ endpoint   ${config.endpoint}`);
+  console.log(`✅ runtime    ${config.runtime}`);
+  console.log(`✅ endpoint   ${config.endpoint}   (agent-endpoint[capsule])`);
+  console.log(
+    `${config.webEndpoint === "" ? "  " : "✅"} telegram   ${config.webEndpoint === "" ? "(no agent-endpoint[web] — the bot is not published)" : config.webEndpoint}`,
+  );
+  console.log(
+    `${config.context === "" ? "  " : "✅"} context    ${config.context === "" ? "(no agent-context)" : config.context}`,
+  );
   // The pointer is safe to print. Whatever it resolves to in task 4 is not:
   // stdout is Fly's log stream, and the fleet dashboard reads that stream.
   console.log(`✅ prompt     ${config.promptRef} → (pointer, resolved in task 4)`);

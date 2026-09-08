@@ -1,8 +1,8 @@
 /**
  * Reads one text record off the runner's own name and prints it.
  *
- *   npm run resolve                  # agent.model
- *   npm run resolve agent.heartbeat  # any key
+ *   npm run resolve                  # agent-model
+ *   npm run resolve agent-heartbeat  # any key
  *
  * Exists so the read path can be exercised without the loop around it.
  */
@@ -10,6 +10,7 @@ import "dotenv/config";
 import { createRunnerClient } from "./chain.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { encodeName, readText } from "./resolve.js";
+import { KEY_MODEL } from "./records.js";
 
 const why = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
@@ -25,7 +26,7 @@ async function main() {
     throw error;
   }
 
-  const key = process.argv[2] ?? "agent.model";
+  const key = process.argv[2] ?? KEY_MODEL;
   const { name, node, dnsName } = encodeName(env.capsuleName);
   const client = createRunnerClient(env.rpcUrl);
 

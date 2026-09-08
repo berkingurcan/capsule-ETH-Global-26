@@ -32,6 +32,20 @@ export function promptFetchMessage(name: string, promptRef: string, timestamp: n
   return [PROMPT_FETCH_PREFIX, name, promptRef, String(timestamp)].join("\n");
 }
 
+/**
+ * Domain separator for the runtime credential fetch. CANONICAL: runner/src/runtime.ts.
+ *
+ * Deliberately not the prompt prefix. Both requests are signed by the same key inside the
+ * same 60-second window, and the credential endpoint hands back the owner's Telegram bot
+ * token — a signature captured from a prompt request must not open it. Separate prefix,
+ * separate message shape, and no ref: credentials are per capsule, not per pointer.
+ */
+export const RUNTIME_FETCH_PREFIX = "capsule-runtime-fetch";
+
+export function runtimeFetchMessage(name: string, timestamp: number): string {
+  return [RUNTIME_FETCH_PREFIX, name, String(timestamp)].join("\n");
+}
+
 export function isTimestampFresh(timestamp: number, now = Math.floor(Date.now() / 1000)): boolean {
   const age = now - timestamp;
   return age <= SIGNATURE_TTL_SECONDS && age >= -CLOCK_SKEW_SECONDS;

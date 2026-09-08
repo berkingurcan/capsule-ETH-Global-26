@@ -1,13 +1,19 @@
 /**
- * The heartbeat — the agent asking the protocol whether it is still allowed.
+ * The heartbeat — the agent asking the protocol whether it is still allowed, and
+ * leaving a record that it asked.
  *
- * Two ways to ask, and the runner uses the cheap one.
+ * Two ways to ask, and the runner uses both, at deliberately different rates.
  *
- *   probeHeartbeat  eth_call. Free. Same modifier, same revert. This is what
- *                   the loop runs, every tick.
- *   writeHeartbeat  a real transaction. Kept as a manual tool, not called by
- *                   the loop: paying gas to learn what a free call already
- *                   tells you does not become a better answer.
+ *   probeHeartbeat  eth_call. Free. Same modifier, same revert. Runs every tick,
+ *                   which is what makes a recall look instant.
+ *   writeHeartbeat  a real transaction, every HEARTBEAT_SECONDS — three a day by
+ *                   default. This is the part anyone else can see: the probe
+ *                   answers the agent's question and leaves nothing behind, and a
+ *                   liveness signal only the agent can observe is not one.
+ *
+ * Splitting them is the whole design. Probing at the heartbeat rate would make
+ * revocation take up to eight hours; writing at the probe rate would cost ~54
+ * ETH/year per agent at 10 gwei. Neither is a product.
  *
  * Two habits matter here and both come out of hard-won notes:
  *
@@ -51,7 +57,7 @@ export function heartbeatValue(sequence: number): string {
 
 /**
  * Asks the resolver whether this agent may still write its heartbeat, without
- * writing it.
+ * writing it — the fast path between two paid writes.
  *
  * simulateContract is an eth_call: free, and it runs the same onlyPartRoles
  * modifier the real transaction would, so a revoked agent gets back the same
@@ -59,11 +65,8 @@ export function heartbeatValue(sequence: number): string {
  * probed is real and revocable; the agent simply checks it rather than
  * spending gas to exercise it.
  *
- * The consequence worth knowing: agent.heartbeat never advances on chain, so
- * an on-chain "last seen" is not available. The owner's revocation event is,
- * and that is the one the subgraph in build step 5 cares about.
- *
- * Throws exactly what a denied write throws. Task 6's classifier reads it.
+ * Throws exactly what a denied write throws, so halt.ts classifies a denied
+ * probe and a denied write through the same path.
  */
 export async function probeHeartbeat(args: {
   publicClient: PublicClient;

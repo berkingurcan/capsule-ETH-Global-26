@@ -92,6 +92,10 @@ export const aad = {
   prompt: (ref: string, capsuleName: string) => `capsule_prompt:${ref}:${capsuleName}`,
   agent: (capsuleName: string, agentAddress: string) =>
     `capsule_agent:${capsuleName}:${agentAddress.toLowerCase()}`,
+  // Bound to the kind as well as the capsule, so a model API key cannot be moved into
+  // the row a runner reads as its Telegram bot token — the gateway would then present a
+  // provider key to Telegram's API, which logs what it is given.
+  credential: (capsuleName: string, kind: string) => `capsule_credential:${capsuleName}:${kind}`,
 };
 
 /** Constant-time compare, for anywhere a secret is checked against user input. */

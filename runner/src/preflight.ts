@@ -2,7 +2,7 @@
  * Preflight — every boring reason the runner could fail, caught at boot.
  *
  * The runner is meant to die exactly once, for exactly one reason: its write
- * permission on `agent.heartbeat` was revoked. Anything else that can stop it —
+ * permission on `agent-heartbeat` was revoked. Anything else that can stop it —
  * a wrong network, an empty wallet, the wrong key — has to be ruled out here,
  * or a revoked agent and a misconfigured agent look identical on camera.
  *

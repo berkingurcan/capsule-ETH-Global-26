@@ -8,7 +8,7 @@ const TOUR = [
     n: "01",
     cap: "#FFC42E",
     title: "The launchpad",
-    body: "Pick a subname, give it a brain, pay a dollar over x402, mint. Five screens, one form.",
+    body: "Pick a subname, give it a brain and your Telegram bot, mint. Five screens, one form.",
     cta: "Hire an agent",
   },
   {
@@ -16,7 +16,7 @@ const TOUR = [
     n: "02",
     cap: "#8CF0B4",
     title: "The fleet",
-    body: "Every capsule you own, its heartbeat, its balance, its live log — and the button that pulls its permission.",
+    body: "Every capsule you own, its records, its heartbeat, its live log — and the button that pulls its permission.",
     cta: "Open the dashboard",
   },
   {
@@ -24,7 +24,7 @@ const TOUR = [
     n: "03",
     cap: "#FF4D8D",
     title: "The analyst",
-    body: "Ask what the fleet did today. It reads both subgraphs and answers in sentences, not tables.",
+    body: "Ask what the fleet did today. It reads the subgraph and answers in sentences, not tables.",
     cta: "Ask a question",
   },
 ];
@@ -58,9 +58,9 @@ export default function Home() {
           <div className="row wrapflex" style={{ gap: 10, marginTop: 34 }}>
             <span className="pill onblue">ENSv2 subnames</span>
             <span className="pill onblue">EAC roles</span>
-            <span className="pill onblue">x402 checkout</span>
-            <span className="pill onblue">Two subgraphs</span>
-            <span className="pill onblue">Telegram runners</span>
+            <span className="pill onblue">ENSIP-25 · 26 · 27</span>
+            <span className="pill onblue">Subgraph MCP</span>
+            <span className="pill onblue">OpenClaw on Telegram</span>
           </div>
          </div>
 
@@ -74,7 +74,7 @@ export default function Home() {
                 { c: "#FF4D8D", n: "marketing", s: 62 },
               ].map((x) => (
                 <div key={x.n} style={{ textAlign: "center" }}>
-                  <Capsule size={x.s} cap={x.c} title={x.n + ".berkin.eth"} />
+                  <Capsule size={x.s} cap={x.c} title={x.n + ".capsulefleet.eth"} />
                   <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
                     {x.n}
                   </div>
@@ -82,12 +82,12 @@ export default function Home() {
               ))}
             </div>
             <hr className="sep" style={{ margin: "18px 0" }} />
-            <div className="label">Mint fee</div>
+            <div className="label">Keys the agent may write</div>
             <div className="wm" style={{ fontSize: 46, marginTop: 6 }}>
-              1 USDC
+              1
             </div>
             <div className="mono hint" style={{ marginTop: 6 }}>
-              per agent · settled in 183 ms
+              agent-heartbeat · out of nine
             </div>
           </div>
         </div>
@@ -100,9 +100,9 @@ export default function Home() {
             <p className="kicker">The mechanic</p>
             <h2>How an agent dies.</h2>
             <p className="lede">
-              The agent proves it is alive by writing to its own name every 60 seconds. That write needs a role. Pull
-              the role and the write reverts — so the kill switch is not something we built, it is the one ENSv2
-              already has.
+              The agent proves it is alive by writing <span className="mono">agent-heartbeat</span> to its own name.
+              That write needs a role scoped to that one key. Pull the role and the write reverts — so the kill switch
+              is not something we built, it is the one ENSv2 already has.
             </p>
           </div>
 
@@ -111,7 +111,7 @@ export default function Home() {
               <svg
                 viewBox="0 0 760 215"
                 role="img"
-                aria-label="The runner writes a heartbeat to its own name every 60 seconds. The resolver checks the agent's role: if it still holds it the write lands and the runner keeps going; if the owner has revoked it the write fails with EACUnauthorizedAccountRoles and the runner halts itself."
+                aria-label="The runner writes a heartbeat to its own name. The resolver checks the agent's role on that one record key: if it still holds it the write lands and the runner keeps going; if the owner has revoked it the write fails with EACUnauthorizedAccountRoles and the runner halts itself, stopping the agent's Telegram bot on the way out."
                 style={{ width: "100%", minWidth: 680, height: "auto", display: "block", margin: "0 auto", maxWidth: 760 }}
               >
                 <defs>
@@ -129,16 +129,16 @@ export default function Home() {
                   runner
                 </text>
                 <text x="106" y="145" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="11.5" fill="#5C6E96">
-                  trader.berkin.eth
+                  trader.capsulefleet.eth
                 </text>
 
                 {/* runner -> resolver */}
                 <line x1="196" y1="132" x2="322" y2="132" stroke="#12203F" strokeWidth="3" markerEnd="url(#ah)" />
                 <text x="259" y="120" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="10.5" fill="#12203F">
-                  setText(heartbeat)
+                  setText(agent-heartbeat)
                 </text>
                 <text x="259" y="150" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="10.5" fill="#5C6E96">
-                  every 60s
+                  3× a day
                 </text>
 
                 {/* owner */}
@@ -148,13 +148,13 @@ export default function Home() {
                 </text>
                 <line x1="418" y1="50" x2="418" y2="84" stroke="#E03131" strokeWidth="3" markerEnd="url(#ah-red)" />
                 <text x="428" y="72" fontFamily="'Azeret Mono', monospace" fontSize="10.5" fill="#E03131">
-                  revokeRoles()
+                  authorizeTextRoles(…, false)
                 </text>
 
                 {/* resolver */}
                 <rect x="330" y="88" width="176" height="88" fill="#fff" stroke="#12203F" strokeWidth="3" rx="10" />
                 <text x="418" y="116" textAnchor="middle" fontFamily="Rubik, sans-serif" fontSize="13" fontWeight="700" fill="#12203F">
-                  PublicResolverV2
+                  PermissionedResolver
                 </text>
                 <text x="418" y="136" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="10.5" fill="#5C6E96">
                   checks the EAC role
@@ -235,8 +235,8 @@ export default function Home() {
             <p className="kicker">Read off the subgraphs</p>
             <h2>Everything an agent does leaves a row.</h2>
             <p className="lede">
-              Names and permissions are indexed on ETH Sepolia; payments are indexed on Base Sepolia. One feed, two
-              chains, no bridge between them.
+              Mints, record changes, role grants and heartbeat writes are all indexed off ETH Sepolia. One chain, one
+              feed, and every row is something the owner or the agent actually signed.
             </p>
           </div>
           <ActivityFeed limit={5} />

@@ -38,7 +38,7 @@ export type HeartbeatVerdict = "revoked" | "transient";
  *
  * `part` is keccak256 of the record key for a per-key resource, and zero for
  * the name-level one. Reproduce from the shell with:
- *   cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent.heartbeat'))
+ *   cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent-heartbeat'))
  */
 export function textResource(node: Hex, key: string): bigint {
   const part = keccak256(toHex(key));

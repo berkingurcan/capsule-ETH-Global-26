@@ -273,9 +273,47 @@ The `_ADMIN` half is required because `authorizeTextRoles` calls `_checkCanGrant
 before granting. Root-level, because the name does not exist when the minter is deployed,
 so a per-name grant is impossible.
 
+## 2026-09-08 — the record keys moved to the ENSIPs
+
+Every key was renamed from dots to kebab-case, and four were added. The reasoning is in
+`../../Branding-ENSClaw/DECISIONS.md`; the table is in `RECORDS.md` next to it. What
+matters here is the on-chain consequence.
+
+**The rename moves the permission.** A per-key EAC resource is
+`keccak256(abi.encode(node, keccak256(key)))`, so `agent.heartbeat` and `agent-heartbeat`
+are two different resources. An agent authorised under the old key gets
+`EACUnauthorizedAccountRoles` writing the new one — byte-identical to a revocation, per
+gotcha 6. The golden resource ids recorded above are therefore for the *old* keys; they
+are kept in the test suite as encoding vectors, not as live values.
+
+**`CapsuleMinter` must be redeployed.** The keys are `constant`s and the grant is per key.
+`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362` authorises `agent.heartbeat`; every name it
+minted is a testnet name and gets re-minted rather than migrated.
+
+**The constructor takes a sixth argument**, `schemaUri` — the ENSIP-27 `schema` record
+every minted name carries. It is fixed for the life of a deployment, so it must be live
+before the first mint. `CAPSULE_SCHEMA_URI` in `.env`.
+
+**One new thing worth knowing.** ENSIP-25's key embeds the registry as an ERC-7930
+interoperable address, which the contract derives at construction from `block.chainid`
+and `address(this)` rather than taking as configuration:
+
+```
+0x 0001 0000 03 aa36a7 14 <minter, lowercase, unprefixed>
+   ver  eip155 len  11155111  len=20
+```
+
+The chain reference is **minimal** big-endian — chain 1 is `01`, not zero-padded. A padded
+encoding is a different string, which is a different key, which resolves to the empty
+string with no error at all. `forge test --match-contract AgentRecords` checks it against
+the vector printed in ENSIP-25 itself.
+
+Read it back with `minter.registrationKey(tokenId)`; never hardcode it, because it changes
+on every redeploy.
+
 ## Next
 
-Step 3 of the build plan: the runner. It resolves its own name through
-`UniversalResolverV2`, writes `agent.heartbeat` on a timer, and **halts itself** when that
-write reverts with `EACUnauthorizedAccountRoles`. The revert is already reproducible by
-hand, so the runner has a known-good failure to catch.
+Step 4 of the build plan: the provisioner route. It generates the agent EOA, **funds it**
+— the heartbeat is a real transaction again as of 2026-09-08 — seals the prompt and the
+owner's credentials, calls `mint()`, and creates the Fly machine. The runner and both
+service routes it talks to already exist.

@@ -1,5 +1,5 @@
 /* Heartbeat intervals, one point a minute. A flat line is a healthy
-   agent — every write landed at 60 seconds. A break in the line is the
+   agent — every write landed on the interval. A break in the line is the
    thing the analyst looks for. */
 
 export default function Sparkline({
@@ -35,8 +35,8 @@ export default function Sparkline({
       role="img"
       aria-label={
         broken
-          ? "Heartbeat intervals held at 60 seconds, then stopped at the recall."
-          : "Heartbeat intervals holding steady at 60 seconds."
+          ? "Heartbeat intervals held at the configured 60s, then stopped at the recall."
+          : "Heartbeat intervals holding steady at the configured 60s."
       }
       style={{ width: "100%", height: "auto", display: "block", overflow: "visible" }}
     >

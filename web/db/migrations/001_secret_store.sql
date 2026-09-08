@@ -1,4 +1,4 @@
--- The encrypted store behind the `agent.prompt` pointer.
+-- The encrypted store behind the `agent-prompt` pointer.
 --
 -- Nothing in here is readable with database access alone: every secret column
 -- holds an AES-256-GCM envelope whose additional-authenticated-data binds the
@@ -9,7 +9,7 @@
 -- function body without the splitter guessing wrong.
 
 create table if not exists capsule_prompt (
-  -- The public pointer. This value is written into the ENS `agent.prompt`
+  -- The public pointer. This value is written into the ENS `agent-prompt`
   -- record, so it is world-readable and is NOT a bearer token: possession of a
   -- ref grants nothing. Authorisation is the signature check at the edge.
   ref           text primary key,

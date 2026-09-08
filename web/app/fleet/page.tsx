@@ -5,7 +5,7 @@ import Link from "next/link";
 import AgentCard from "@/components/AgentCard";
 import ActivityFeed from "@/components/ActivityFeed";
 import RecallDialog from "@/components/RecallDialog";
-import { AGENTS, PARENT, usd, type Agent } from "@/lib/mock";
+import { AGENTS, PARENT, type Agent } from "@/lib/mock";
 
 export default function FleetPage() {
   const [recalled, setRecalled] = useState<string[]>([]);
@@ -20,9 +20,8 @@ export default function FleetPage() {
   const live = agents.filter((a) => a.status !== "recalled");
   const running = agents.filter((a) => a.status === "running");
   const booting = live.length - running.length;
-  const held = live.reduce((s, a) => s + a.balance, 0);
-  const net = live.reduce((s, a) => s + a.earned - a.spent, 0);
-  const calls = agents.reduce((s, a) => s + a.calls, 0);
+  const beats = agents.reduce((s, a) => s + a.beats, 0);
+  const bots = live.filter((a) => a.telegram !== "").length;
 
   const stats = [
     {
@@ -30,9 +29,9 @@ export default function FleetPage() {
       v: String(live.length),
       sub: running.length + " running" + (booting ? " · " + booting + " booting" : "") + " · " + agents.length + " minted",
     },
-    { k: "USDC held", v: usd(held), sub: "across every agent wallet" },
-    { k: "Net today", v: (net >= 0 ? "+" : "−") + usd(Math.abs(net)), sub: "earned minus spent, x402" },
-    { k: "Paid calls", v: String(calls), sub: "agent to agent, on Base" },
+    { k: "Heartbeats", v: String(beats), sub: "writes on Sepolia, 3 a day per agent" },
+    { k: "Telegram bots", v: String(bots), sub: "one per live capsule, yours not ours" },
+    { k: "Recalled", v: String(agents.length - live.length), sub: "one resolver call each, reversible" },
   ];
 
   return (
@@ -47,7 +46,7 @@ export default function FleetPage() {
               {PARENT.name} is running {running.length} agent{running.length === 1 ? "" : "s"}
             </h2>
             <p className="hint" style={{ marginTop: 6 }}>
-              Status comes from heartbeat writes on Sepolia. Balances come from the Base subgraph.
+              Every number here comes off one chain. Status is the free authorization probe; the counter is the write.
             </p>
           </div>
           <Link href="/launch" className="btn btn-primary">
@@ -80,8 +79,8 @@ export default function FleetPage() {
             <div className="notice paper">
               <span className="tag ink">Override</span>
               <p style={{ margin: 0 }}>
-                Recall pulls one role and nothing else. The subname stays yours, the records stay readable, and the
-                agent stops itself within 60 seconds.
+                Recall pulls one role and nothing else — one call on your own resolver, not on anything of ours. The
+                subname stays yours, the records stay readable, and the agent stops itself on its next probe.
               </p>
             </div>
           </div>

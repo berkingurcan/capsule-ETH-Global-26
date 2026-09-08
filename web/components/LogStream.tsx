@@ -19,10 +19,10 @@ const MORE: Record<string, string[]> = {
     "telegram: sent commit digest",
   ],
   marketing: [
-    "resolved marketing.berkin.eth · 6 records",
+    "resolved marketing.capsulefleet.eth · 9 records",
     "model=claude-sonnet-5 tools=draft,schedule,notify",
-    "secrets cap_71a4ef unsealed",
-    "telegram bot online · @berkin_mktg_bot",
+    "prompt cap_71a4ef unsealed · openclaw gateway started",
+    "telegram bot online · @capsule_mktg_bot",
     "heartbeat written · block 7412896",
   ],
   research: [],
@@ -31,7 +31,7 @@ const MORE: Record<string, string[]> = {
 function paint(line: string) {
   if (line.includes("revert") || line.includes("EACUnauthorized")) return "r";
   if (line.startsWith("heartbeat")) return "g";
-  if (line.startsWith("x402")) return "p";
+  if (line.startsWith("openclaw")) return "p";
   if (line.startsWith("telegram")) return "y";
   return "w";
 }
