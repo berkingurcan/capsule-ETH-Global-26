@@ -9,22 +9,17 @@
  * Exits 0 with every check passing, 1 otherwise. Nothing else.
  */
 import "dotenv/config";
-import { formatEther, isAddressEqual, parseEther } from "viem";
+import { formatEther, formatGwei, isAddressEqual } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { CHAIN, createRunnerClient } from "./chain.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
-
-/**
- * Informational only. The runner probes its authorization with eth_call and
- * never sends a transaction, so an agent with an empty wallet is fine — the
- * balance matters only for the manual `npm run heartbeat` tool.
- */
-const NOTABLE_GAS = parseEther("0.002");
+import { LOW_BEATS, readFunding } from "./heartbeat.js";
 
 type Check = { label: string; ok: boolean; detail: string };
 
 const short = (address: string) => `${address.slice(0, 10)}…${address.slice(-6)}`;
 const eth = (wei: bigint) => `${Number(formatEther(wei)).toFixed(6)} ETH`;
+const gwei = (wei: bigint) => `${Number(formatGwei(wei)).toFixed(2)} gwei`;
 const why = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
 function fail(line: string): never {
@@ -86,24 +81,44 @@ async function main() {
             : `${short(account.address)} ≠ AGENT_ADDRESS ${short(env.agentAddress)}`,
     });
 
-    // 4 — balance, for information. Not a gate: see NOTABLE_GAS above.
-    let gasNote = "not checked — wrong or unreachable chain";
-    if (onSepolia) {
+    // 4 — can it pay for its own heartbeat?
+    //
+    // This became a real check when the heartbeat became a real transaction. An
+    // agent that cannot afford one write never writes one, and on a dashboard a
+    // heartbeat that never advances is indistinguishable from a revoked agent —
+    // which is the single confusion this whole file exists to prevent.
+    //
+    // Zero affordable beats fails; merely low warns. The runner survives an
+    // empty wallet by design, degrading to probe-only, so "low" is a thing to
+    // fix rather than a reason to refuse to start.
+    if (!onSepolia) {
+        // The rpc and chain checks have already failed; adding a third failure
+        // for the same cause buries the one that can be acted on.
+        checks.push({ label: "gas", ok: true, detail: "not checked — wrong or unreachable chain" });
+    } else {
         try {
-            const balance = await client.getBalance({ address: account.address });
-            gasNote =
-                balance >= NOTABLE_GAS
-                    ? `${eth(balance)} — enough for manual writes`
-                    : `${eth(balance)} — read-only operation unaffected`;
+            const { balance, gasPrice, beats, low } = await readFunding(client, account.address);
+            const body = `${eth(balance)} · ~${beats.toLocaleString("en-US")} beats at ${gwei(gasPrice)}`;
+            checks.push({
+                label: "gas",
+                ok: beats > 0,
+                detail:
+                    beats === 0
+                        ? `${body} — cannot afford a single heartbeat. Fund ${short(account.address)}`
+                        : low
+                            ? `${body} — under ${LOW_BEATS}, top it up`
+                            : body,
+            });
         } catch (error) {
-            gasNote = `balance unreadable — ${why(error)}`;
+            // Unreadable is not the same as empty, and failing the run on a
+            // guess would be worse than saying which one we could not tell.
+            checks.push({ label: "gas", ok: true, detail: `balance unreadable — ${why(error)}` });
         }
     }
 
     // Print every result, passing or not: fixing one variable at a time, four
     // times over, is its own kind of 2am.
     console.log(`   capsule   ${env.capsuleName}`);
-    console.log(`   gas       ${gasNote}`);
     for (const check of checks) {
         console.log(`${check.ok ? "✅" : "❌"} ${check.label.padEnd(9)} ${check.detail}`);
     }

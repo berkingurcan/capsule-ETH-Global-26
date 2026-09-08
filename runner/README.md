@@ -11,13 +11,23 @@ addr                     who this agent is        → refuses to boot if it is n
 agent-model              which brain              → swap it on chain, no redeploy
 agent-endpoint[capsule]  where the prompt lives
 agent-prompt             cap_8f3d1a               → a pointer; the body stays off chain
-agent-heartbeat          the one key it may write → and the one it is probed against
+agent-heartbeat          the one key it may write → beat-1, beat-2, beat-3…
 ```
 
-**No transactions.** The authorization probe is an `eth_call`, so an agent needs
-a key and nothing else — no funded wallet, and no funding pipeline behind it.
-The trade is that `agent-heartbeat` never advances on chain, so there is no
-on-chain last-seen; the owner's revocation event carries the fact that matters.
+**Two cadences.** Every `TICK_SECONDS` the runner asks whether it is still
+authorized — an `eth_call`, free, same modifier and same revert as the write.
+Every `HEARTBEAT_SECONDS` it writes `beat-<n>` for real.
+
+The check and the record are different jobs. A free call proves the permission
+is live to the process holding it and to nobody else; the write is the part an
+observer with nothing but the chain can read. Probing in between is what keeps a
+revocation caught in one tick instead of one heartbeat interval.
+
+So the agent needs a funded wallet — 66,420 gas a beat, measured. It is still
+the least privileged key in the system: one text record, on one name. An empty
+wallet degrades it to probe-only rather than stopping it, and says so in the log
+every time it tries, because a heartbeat that stops advancing for want of gas
+looks exactly like a revoked one.
 
 ## Environment
 
@@ -31,7 +41,8 @@ given is one that fails in a way that looks like a revocation.
 | `AGENT_ADDRESS` | must match `AGENT_KEY`, and match `addr` on the name |
 | `AGENT_KEY` | the agent's key — deliberately the weakest in the system |
 | `CAPSULE_NAME` | e.g. `analyst.capsulefleet.eth` |
-| `TICK_SECONDS` | default 30, minimum 5 |
+| `TICK_SECONDS` | probe cadence. Default 30, minimum 5 |
+| `HEARTBEAT_SECONDS` | write cadence. Default 28800 (3/day); `60` for a demo. Must be >= `TICK_SECONDS` |
 | `CAPSULE_ENDPOINT_OVERRIDE` | dev only, announced in the logs when set |
 
 ## Commands
@@ -39,11 +50,11 @@ given is one that fails in a way that looks like a revocation.
 | | |
 |---|---|
 | `npm start` | the runner |
-| `npm run preflight` | RPC, chain, identity, balance |
+| `npm run preflight` | RPC, chain, identity, and whether it can afford a beat |
 | `npm run config` | the whole capsule, as read off the name |
 | `npm run resolve [key]` | one text record |
 | `npm run prompt` | fetch the prompt and print nothing that matters |
-| `npm run heartbeat` | write one beat on chain. Manual tool; the loop never calls it |
+| `npm run heartbeat` | write one beat on chain, by hand. The loop does this on its own now |
 | `npm run dev:prompt-server` | local stand-in for the prompt service |
 | `npm run typecheck` | |
 
@@ -52,8 +63,12 @@ given is one that fails in a way that looks like a revocation.
 ```bash
 npm run dev:prompt-server                       # terminal 1
 CAPSULE_ENDPOINT_OVERRIDE=http://localhost:8787 \
-  TICK_SECONDS=15 npm start                     # terminal 2
+  TICK_SECONDS=15 HEARTBEAT_SECONDS=60 npm start   # terminal 2
 ```
+
+Every beat is a real Sepolia transaction. `HEARTBEAT_SECONDS=60` for an hour is
+60 beats, about 0.004 ETH at 1 gwei — cheap, but not free, and the agent wallet
+is the one paying.
 
 ## Docker
 
@@ -61,7 +76,7 @@ CAPSULE_ENDPOINT_OVERRIDE=http://localhost:8787 \
 docker build -t capsule-runner .
 
 docker run --init --rm --env-file .env \
-  -e TICK_SECONDS=5 \
+  -e TICK_SECONDS=5 -e HEARTBEAT_SECONDS=60 \
   -e CAPSULE_ENDPOINT_OVERRIDE=http://host.docker.internal:8787 \
   capsule-runner
 ```
@@ -95,9 +110,12 @@ cast send --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
 ```
 🔴 denied     setText(agent-heartbeat) refused by the resolver
 🔴 confirmed  no ROLE_SET_TEXT on agent-heartbeat, and none via the wildcard
-🔴 halted     analyst.capsulefleet.eth · N ticks this run · 0 transactions
+🔴 halted     analyst.capsulefleet.eth · N ticks, M beats this run · last beat-3
 runner halted
 ```
+
+The probe is what catches it, so this lands within one tick even if the next
+paid beat was hours away.
 
 **4. Check the exit code.** It must be `0`.
 
@@ -111,6 +129,32 @@ a kill switch and a crash.
 
 **5. Grant it back** — the same command with `true` — and start it again. The
 kill switch has to be reversible or the fleet dashboard is a one-way door.
+
+## The empty-wallet test
+
+The other half of the kill test, and the one nobody rehearses. A revoked agent
+and a broke agent both stop writing `agent-heartbeat`, so from the chain alone
+they are the same event. Only the log tells them apart, so the log has to be
+right.
+
+Point the runner at a funded name with an unfunded key — any fresh keypair whose
+address is *not* `addr` on the name will fail the boot identity check first, so
+instead drain the agent, or run against a name minted to a key you have emptied.
+Expect, on the beat and not on the probe:
+
+```
+⚠️  12:00:30  beat unaffordable — the permission is intact, the wallet is not
+   gas        0.000000 ETH · ~0 beats at 1.04 gwei — under 100. Fund 0xca26…
+✅ 12:00:31  tick 3 · authorized · 0.4s
+```
+
+Three things must be true. It says **unfunded**, never "denied". It keeps
+ticking — the probe is free, so authorization is still being checked every tick
+and a revocation would still be caught. And it does not spend the failure
+budget, so it never exits: a top-up is meant to be a top-up, not a redeploy.
+
+`npm run preflight` fails outright at zero affordable beats, which is the same
+fact caught earlier.
 
 ## Swapping the prompt while it runs
 

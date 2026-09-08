@@ -49,8 +49,14 @@ export type RunnerEnv = {
   agentKey: Hex;
   agentAddress: Address;
   capsuleName: string;
-  /** Seconds between authorization probes. Free, so this can be brisk. */
+  /** Seconds between authorization probes. A free eth_call, so this is brisk. */
   tickSeconds: number;
+  /**
+   * Seconds between on-chain heartbeat writes. Costs gas, so it is not brisk:
+   * three times a day in production, and one environment variable away from
+   * once a minute when a demo needs the dashboard to move.
+   */
+  heartbeatSeconds: number;
   /**
    * Development only: talk to a local prompt service instead of the endpoint
    * published on the name. Not a fallback — it applies only when explicitly
@@ -99,6 +105,24 @@ export function loadEnv(): RunnerEnv {
     throw new InvalidEnvError("TICK_SECONDS", "must be a whole number of seconds, at least 5");
   }
 
+  // Default 28800 — 3 beats a day. The write is the liveness record, not the
+  // liveness check: the probe on every tick is what catches a revocation, and
+  // this is what leaves a trace of it on chain.
+  const rawBeat = optionalEnv("HEARTBEAT_SECONDS") ?? "28800";
+  const heartbeatSeconds = Number(rawBeat);
+  if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 5) {
+    throw new InvalidEnvError("HEARTBEAT_SECONDS", "must be a whole number of seconds, at least 5");
+  }
+  // The loop can only beat on a tick boundary, so a shorter interval than the
+  // tick does not beat faster — it beats every tick and silently ignores what
+  // it was asked for. Refuse rather than pretend.
+  if (heartbeatSeconds < tickSeconds) {
+    throw new InvalidEnvError(
+      "HEARTBEAT_SECONDS",
+      `is ${heartbeatSeconds}s but TICK_SECONDS is ${tickSeconds}s — the loop cannot beat faster than it ticks`,
+    );
+  }
+
   const endpointOverride = optionalEnv("CAPSULE_ENDPOINT_OVERRIDE");
   if (endpointOverride !== undefined) {
     try {
@@ -108,5 +132,13 @@ export function loadEnv(): RunnerEnv {
     }
   }
 
-  return { rpcUrl, agentKey, agentAddress, capsuleName, tickSeconds, endpointOverride };
+  return {
+    rpcUrl,
+    agentKey,
+    agentAddress,
+    capsuleName,
+    tickSeconds,
+    heartbeatSeconds,
+    endpointOverride,
+  };
 }
