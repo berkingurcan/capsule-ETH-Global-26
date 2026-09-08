@@ -24,6 +24,7 @@
  * appearing to respect it. The config on disk is not a secret store and is not
  * treated as one.
  */
+import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
 import { mkdir, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -35,11 +36,45 @@ import type { RuntimeCredentials } from "./runtime.js";
 /** Where the gateway looks unless OPENCLAW_CONFIG_PATH says otherwise. */
 export const CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
 
-/** How long the gateway gets to stop politely before it is killed. */
-const STOP_GRACE_MS = 10_000;
+/** The agent's workspace, and so where its persona lives. */
+export const WORKSPACE_PATH = join(homedir(), ".openclaw", "workspace");
+
+/**
+ * The file OpenClaw injects into the system prompt every turn.
+ *
+ * There is no `systemPrompt` config key. A persona reaches an OpenClaw agent as
+ * a bootstrap file in its workspace, and `agents.defaults.contextInjection`
+ * defaults to `"always"`. Measured against 2026.9.3: the gateway writes these
+ * files only when they are absent, so one written before the child is spawned
+ * survives startup untouched.
+ */
+export const PERSONA_PATH = join(WORKSPACE_PATH, "AGENTS.md");
+
+/**
+ * How long the gateway gets to stop politely before it is killed.
+ *
+ * A clean shutdown was measured at 10.06s on 2026.9.3 — the channels get five
+ * seconds to drain and Telegram takes all of it. At the old 10s this SIGKILLed
+ * every single time, one tenth of a second from succeeding.
+ */
+const STOP_GRACE_MS = 15_000;
 
 /** Restart backoff, so a gateway that cannot start does not spin. */
 const RESTART_DELAY_MS = 3_000;
+
+/** Ceiling on the backoff. Beyond this, waiting longer helps nobody. */
+const MAX_RESTART_DELAY_MS = 60_000;
+
+/**
+ * Consecutive restarts before the supervisor stops treating this as a blip.
+ *
+ * It never stops the supervisor — the permission is still held and the
+ * heartbeat is still true — but a gateway that has failed this many times in a
+ * row is a capsule with no bot, and that has to be visible. The alternative is
+ * the failure this constant exists for: a machine that ticks `authorized`
+ * forever while nothing answers in Telegram.
+ */
+const RESTART_ALARM = 5;
 
 export class OpenClawError extends Error {
   constructor(message: string) {
@@ -59,6 +94,41 @@ export class OpenClawError extends Error {
  * custom provider — a base URL and an API flavour. The `apiKey` field is an
  * interpolation token, not a key.
  */
+/**
+ * Who is allowed to DM this agent.
+ *
+ * OpenClaw's default DM policy is `pairing`: the owner messages the bot, and
+ * somebody runs `openclaw pairing approve telegram <CODE>` to let them in. A
+ * capsule is a headless machine with no shell, so under the default **the bot
+ * never answers anyone, ever**.
+ *
+ * `CAPSULE_TELEGRAM_ALLOW_FROM` is a comma-separated list of numeric Telegram
+ * user ids. Given one, the agent answers those people and nobody else. Given
+ * nothing, it answers anyone who finds it — which matters more than it sounds,
+ * because the bot handle is published on chain as `agent-endpoint[web]`, so
+ * "anyone who finds it" is "anyone who reads the name". They spend the owner's
+ * API key. Hence the warning, and hence this belongs in the sealed credential
+ * payload beside the bot token rather than in an environment variable.
+ */
+function telegramAccess(): Record<string, unknown> {
+  const raw = process.env.CAPSULE_TELEGRAM_ALLOW_FROM?.trim();
+  if (raw === undefined || raw === "") {
+    return { dmPolicy: "open", allowFrom: ["*"] };
+  }
+
+  const allowFrom = raw
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== "");
+
+  return allowFrom.length > 0 ? { dmPolicy: "allowlist", allowFrom } : { dmPolicy: "open", allowFrom: ["*"] };
+}
+
+/** Whether this capsule is answering the whole world. Reported at boot. */
+export function telegramIsOpen(): boolean {
+  return telegramAccess().dmPolicy === "open";
+}
+
 export function buildOpenClawConfig(
   config: CapsuleConfig,
   credentials: RuntimeCredentials,
@@ -69,9 +139,30 @@ export function buildOpenClawConfig(
     agents: {
       defaults: {
         model: { primary: config.model },
+        workspace: WORKSPACE_PATH,
+        // The name published one persona. Let the gateway generate a second one
+        // beside it and the agent is partly itself and partly OpenClaw's
+        // default — which is not what `agent-prompt` says it is. AGENTS.md is
+        // written by the supervisor and is not in this list, because it is the
+        // one bootstrap file that must exist.
+        skipOptionalBootstrapFiles: ["SOUL.md", "USER.md", "IDENTITY.md"],
       },
     },
   };
+
+  // Telegram is the product surface, so its absence is worth stating rather
+  // than shipping a capsule that heartbeats correctly and can never be spoken
+  // to. The token is deliberately not here: `enabled` turns the plugin on and
+  // it reads TELEGRAM_BOT_TOKEN from the environment, which is where a
+  // credential belongs.
+  if (credentials.telegramToken !== undefined) {
+    document.channels = {
+      telegram: {
+        enabled: true,
+        ...telegramAccess(),
+      },
+    };
+  }
 
   // A built-in provider publishes its own catalog: naming it in the model
   // reference and putting its key in the environment is the whole setup, and an
@@ -126,7 +217,44 @@ export function buildOpenClawEnv(
 
   env.OPENCLAW_CONFIG_PATH = CONFIG_PATH;
 
+  // Without this the gateway refuses to start at all. Measured against 2026.9.3:
+  // it detects a container, defaults to bind=auto, and exits with "Refusing to
+  // bind gateway to auto without auth" — instantly, every time.
+  //
+  // That exit is the most dangerous one in this system, because the supervisor
+  // does not depend on the gateway for anything: it would restart a child that
+  // can never start, tick `authorized`, and pay for heartbeats, while the
+  // dashboard and the chain both showed a healthy capsule that had never once
+  // been able to answer a message. A silent bot is supposed to mean recalled.
+  //
+  // Fresh per boot and never logged. Telegram is the surface; nothing reaches
+  // the Control UI, so this token authenticates no one and needs no stability.
+  env.OPENCLAW_GATEWAY_TOKEN = randomBytes(32).toString("hex");
+
+  // Set by the base image and dropped by the allowlist above, which exists to
+  // keep AGENT_KEY away from the gateway rather than to withhold these.
+  for (const passthrough of ["NODE_ENV", "PLAYWRIGHT_BROWSERS_PATH", "OPENCLAW_STATE_DIR"]) {
+    const value = process.env[passthrough];
+    if (value !== undefined) env[passthrough] = value;
+  }
+
   return env;
+}
+
+/**
+ * Write the persona the name published.
+ *
+ * This is the whole of `agent-prompt` arriving somewhere the model will read it.
+ * Before this existed the body was fetched, measured, logged as a digest and
+ * dropped, so every capsule in the fleet booted as the same default assistant
+ * no matter what its name said.
+ *
+ * Owner-only, like the config: the prompt is not a secret the way an API key is,
+ * but it is the one the owner paid a transaction to point at.
+ */
+export async function writePersona(body: string, path = PERSONA_PATH): Promise<void> {
+  await mkdir(dirname(path), { recursive: true });
+  await writeFile(path, body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
 }
 
 /**
@@ -188,6 +316,7 @@ export class Gateway {
   #restartTimer: NodeJS.Timeout | undefined;
   #env: Record<string, string> = {};
   #starts = 0;
+  #failures = 0;
   readonly #log: GatewayLogger;
 
   constructor(log: GatewayLogger) {
@@ -203,6 +332,17 @@ export class Gateway {
   }
 
   /**
+   * Consecutive restarts with no successful run in between.
+   *
+   * The supervisor reads this rather than assuming a spawned child is a working
+   * one. A capsule whose gateway cannot start is still authorized and still
+   * beating, and both of those are true and neither means the bot works.
+   */
+  get failing(): boolean {
+    return this.#failures >= RESTART_ALARM;
+  }
+
+  /**
    * Materialise the config and (re)start the child.
    *
    * Idempotent in the sense that matters: calling it again is how a model change
@@ -211,13 +351,19 @@ export class Gateway {
   async apply(
     config: CapsuleConfig,
     credentials: RuntimeCredentials,
+    persona: string,
   ): Promise<void> {
     const document = buildOpenClawConfig(config, credentials);
     this.#env = buildOpenClawEnv(config, credentials);
     await writeOpenClawConfig(document);
+    // Before the spawn, always. The gateway reads this file at startup and
+    // creates its own if it is missing, and an agent that boots once with a
+    // generated persona has already introduced itself as somebody else.
+    await writePersona(persona);
 
     if (this.running) await this.stop();
     this.#stopping = false;
+    this.#failures = 0;
     this.#spawn();
   }
 
@@ -225,7 +371,11 @@ export class Gateway {
     if (this.#stopping) return;
 
     this.#starts += 1;
-    const child = spawn("openclaw", ["gateway"], {
+    // `--allow-unconfigured` is what lets the gateway start without having been
+    // through `openclaw onboard`, which is a first-run wizard that writes a
+    // token and an auth-profile directory. A capsule's config arrives complete
+    // from its own ENS records; there is no first run to sit through.
+    const child = spawn("openclaw", ["gateway", "--allow-unconfigured"], {
       // The credential lives here and only here. Inheriting the supervisor's
       // environment would hand the gateway AGENT_KEY, which is the one key in
       // this system that must never leave the supervisor: it is what proves the
@@ -240,13 +390,35 @@ export class Gateway {
 
     this.#child = child;
 
+    // A child that has been up long enough to be doing its job resets the
+    // backoff. Without this, a gateway restarted once an hour for a year would
+    // eventually be waiting a minute to come back from an unrelated blip.
+    const healthy = setTimeout(() => {
+      this.#failures = 0;
+    }, MAX_RESTART_DELAY_MS);
+    healthy.unref();
+
     child.on("exit", (code, signal) => {
+      clearTimeout(healthy);
       if (this.#stopping) return;
 
+      this.#failures += 1;
+      // Exponential, capped. A gateway that cannot start — a bad model, a
+      // revoked API key, a token Telegram no longer honours — must not spin at
+      // one attempt every three seconds for the life of the machine.
+      const delay = Math.min(RESTART_DELAY_MS * 2 ** (this.#failures - 1), MAX_RESTART_DELAY_MS);
+
       this.#log.warn(
-        `gateway exited (${signal ?? `code ${code}`}) — restarting in ${RESTART_DELAY_MS / 1000}s`,
+        `gateway exited (${signal ?? `code ${code}`}) — restart ${this.#failures} in ${delay / 1000}s`,
       );
-      this.#restartTimer = setTimeout(() => this.#spawn(), RESTART_DELAY_MS);
+      if (this.#failures === RESTART_ALARM) {
+        // Said once, and plainly. The permission is intact and the heartbeat is
+        // honest; what is broken is the only part the owner can see.
+        this.#log.warn(
+          `gateway has failed ${RESTART_ALARM} times in a row — this capsule is authorized, beating, and cannot answer a message`,
+        );
+      }
+      this.#restartTimer = setTimeout(() => this.#spawn(), delay);
       this.#restartTimer.unref();
     });
 

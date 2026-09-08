@@ -18,13 +18,27 @@
 # this project claims cannot happen to a capsule.
 FROM ghcr.io/openclaw/openclaw:2026.9.3
 
-WORKDIR /app
-RUN chown node:node /app
+# NOT /app. The base image installs the gateway there — its own `package.json`,
+# its `node_modules`, `openclaw.mjs`. Building the supervisor into the same
+# directory overwrites the first and `npm ci` prunes the second, which uninstalls
+# the brain the supervisor exists to run. The failure is silent at build time and
+# total at runtime, so the supervisor gets its own directory and touches nothing
+# the gateway owns.
+USER root
+RUN mkdir -p /capsule && chown node:node /capsule
 USER node
+WORKDIR /capsule
 
 # Dependencies first: a source edit should not reinstall the world.
+#
+# `--include=dev` is load-bearing, not laziness. The base image sets
+# NODE_ENV=production, under which `npm ci` omits devDependencies — and `tsx` is
+# one, because the supervisor is TypeScript that is never compiled. Without this
+# the image builds clean, passes every check that does not start it, and dies on
+# boot with "Cannot find package 'tsx'". The runner never reaches its own first
+# line, so nothing it would have told you about itself gets said.
 COPY --chown=node:node package.json package-lock.json ./
-RUN npm ci
+RUN npm ci --include=dev
 
 COPY --chown=node:node tsconfig.json ./
 COPY --chown=node:node src ./src
@@ -40,4 +54,6 @@ COPY --chown=node:node src ./src
 # lands on the code that handles it with nothing in between. That matters more
 # now than it did: the handler is what stops the gateway, and a bot still
 # answering after its supervisor is gone is a recall that did not land.
-CMD ["node", "--import", "tsx", "src/runner.ts"]
+# The base image's ENTRYPOINT is `tini -s --` and is deliberately inherited: the
+# supervisor spawns a child that spawns its own, and PID 1 needs to reap them.
+CMD ["node", "--import", "tsx", "/capsule/src/runner.ts"]

@@ -33,7 +33,7 @@ import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked, type HeartbeatVerdict } from "./halt.js";
 import { LOW_BEATS, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
 import { HEARTBEAT_KEY } from "./records.js";
-import { Gateway, runtimeProblems } from "./openclaw.js";
+import { Gateway, runtimeProblems, telegramIsOpen } from "./openclaw.js";
 import { PromptCache, PromptError } from "./prompt.js";
 import { RuntimeError, describeCredentials, fetchRuntime, type RuntimeCredentials } from "./runtime.js";
 import { describeSecret } from "./secret.js";
@@ -193,6 +193,11 @@ async function main() {
   // the trigger, and an unchanged record means there is nothing to ask for.
   let credentials: RuntimeCredentials;
 
+  // The body of `agent-prompt`, which is what actually makes this agent this
+  // agent. Held here because the gateway needs it on every apply, not only the
+  // first: a restart with the previous persona is a restart as the wrong agent.
+  let persona: string;
+
   try {
     const { body } = await prompts.load({
       endpoint,
@@ -200,6 +205,7 @@ async function main() {
       promptRef: config.promptRef,
       signer: account,
     });
+    persona = body.value;
     const shape = describeSecret(body);
     console.log(`   capsule    ${config.name}`);
     console.log(`   resolver   ${config.resolver} (discovered)`);
@@ -248,8 +254,13 @@ async function main() {
 
   // The brain comes up last, once everything it needs has been proved present.
   try {
-    await gateway.apply(config, credentials);
+    await gateway.apply(config, credentials, persona);
     console.log(`   gateway    openclaw gateway · ${config.model}`);
+    console.log(
+      credentials.telegramToken === undefined
+        ? `⚠️  telegram   no bot token — this capsule beats, and nobody can talk to it`
+        : `   telegram   bot online${telegramIsOpen() ? " · open to anyone (CAPSULE_TELEGRAM_ALLOW_FROM is unset)" : ""}`,
+    );
   } catch (error) {
     console.error(`❌ gateway    ${error instanceof Error ? error.message : String(error)}`);
     console.error("boot failed — gateway");
@@ -287,6 +298,13 @@ async function main() {
   // every tick and log the same warning forever.
   let liveModel = config.model;
 
+  // The persona the gateway is actually running, for the same reason `liveModel`
+  // exists: comparing against the record instead would lose the signal the
+  // moment an apply failed, leaving a capsule permanently running a persona its
+  // own name stopped claiming. Compared against the ref rather than the body, so
+  // a re-point to the same text is still a restart the owner asked for.
+  let livePromptRef = config.promptRef;
+
   // The highest sequence this process has written. The per-tick config reload
   // is the only other source of it, and a node that has not caught up with our
   // own transaction yet will hand back the previous value — which would make
@@ -314,10 +332,13 @@ async function main() {
           promptRef: config.promptRef,
           signer: account,
         });
+        // Every tick, not only on a change: this is what the next gateway
+        // restart will be handed, whatever provokes it.
+        persona = body.value;
         if (changed) {
           const shape = describeSecret(body);
           console.log(
-            `🔄 ${stamp()}  prompt ${config.promptRef} · ${shape.length} chars, ${shape.digest} — this is a different agent now`,
+            `🔄 ${stamp()}  prompt ${config.promptRef} · ${shape.length} chars, ${shape.digest} — fetched`,
           );
         }
       } catch (error) {
@@ -336,32 +357,53 @@ async function main() {
       // when its owner mistypes a model name is indistinguishable, on the
       // dashboard, from one that was recalled, and this project's headline claim
       // is that those two are never confused.
-      if (config.model !== liveModel) {
+      const modelChanged = config.model !== liveModel;
+      const personaChanged = config.promptRef !== livePromptRef;
+
+      if (modelChanged || personaChanged) {
+        const what = modelChanged && personaChanged ? "brain and persona" : modelChanged ? "model" : "prompt";
         try {
-          const next = await fetchRuntime({
-            endpoint: env.endpointOverride ?? config.endpoint,
-            name: config.name,
-            signer: account,
-          });
+          // Credentials are refetched only for a model change. A new persona is
+          // served by whatever provider is already paid for, and asking again
+          // would spend a signed request to be told the same thing.
+          const next = modelChanged
+            ? await fetchRuntime({
+                endpoint: env.endpointOverride ?? config.endpoint,
+                name: config.name,
+                signer: account,
+              })
+            : credentials;
 
           const problems = runtimeProblems(config, next);
           if (problems.length > 0) {
             for (const problem of problems) {
-              console.warn(`⚠️  ${stamp()}  model ${config.model} not applied — ${problem}`);
+              console.warn(`⚠️  ${stamp()}  ${what} not applied — ${problem}`);
             }
-            console.warn(`⚠️  ${stamp()}  still running ${liveModel}`);
+            console.warn(`⚠️  ${stamp()}  still running ${liveModel} · ${livePromptRef}`);
           } else {
-            await gateway.apply(config, next);
+            // One restart, whichever of the two changed, and both are carried
+            // in: the config document and AGENTS.md are rewritten together, so
+            // a tick that sees both changes cannot leave the gateway holding
+            // one of them.
+            await gateway.apply(config, next, persona);
             credentials = next;
-            console.log(
-              `🔄 ${stamp()}  model ${liveModel} → ${config.model} · gateway restarted — this is a different brain now`,
-            );
-            liveModel = config.model;
+            if (modelChanged) {
+              console.log(
+                `🔄 ${stamp()}  model ${liveModel} → ${config.model} · gateway restarted — this is a different brain now`,
+              );
+              liveModel = config.model;
+            }
+            if (personaChanged) {
+              console.log(
+                `🔄 ${stamp()}  prompt ${livePromptRef} → ${config.promptRef} · gateway restarted — this is a different agent now`,
+              );
+              livePromptRef = config.promptRef;
+            }
           }
         } catch (error) {
           const reason = error instanceof RuntimeError ? error.message : shortRevert(error);
           console.warn(
-            `⚠️  ${stamp()}  model ${config.model} not applied, still running ${liveModel} — ${reason}`,
+            `⚠️  ${stamp()}  ${what} not applied, still running ${liveModel} · ${livePromptRef} — ${reason}`,
           );
         }
       }
@@ -392,7 +434,12 @@ async function main() {
       }
 
       consecutiveFailures = 0;
-      console.log(`✅ ${stamp()}  tick ${ticks} · authorized · ${secs(Date.now() - startedAt)}`);
+      // Authorized is not the same as working, and this is the one line anybody
+      // reads. A capsule whose gateway will not start is fully authorized and
+      // completely useless, and saying only "authorized" here is how that goes
+      // unnoticed for the length of a demo.
+      const brain = gateway.failing ? " · ⚠️ gateway down" : "";
+      console.log(`✅ ${stamp()}  tick ${ticks} · authorized${brain} · ${secs(Date.now() - startedAt)}`);
     } catch (error) {
       const verdict = await reckon({
         error,
