@@ -27,6 +27,10 @@ contract DeployCapsuleMinter is Script {
         bytes32 parentNode = vm.envBytes32("PARENT_NODE");
         bytes memory parentDns = vm.envBytes("PARENT_DNS");
         uint64 duration = uint64(vm.envOr("CAPSULE_DURATION", uint256(90 days)));
+        // ENSIP-27 `schema`, written on every name. Environment-specific, so it is an
+        // argument rather than a constant: preview and production serve it from
+        // different hosts, and a name pointing at a schema that 404s is worse than none.
+        string memory schemaUri = vm.envString("CAPSULE_SCHEMA_URI");
 
         vm.startBroadcast();
 
@@ -35,7 +39,8 @@ contract DeployCapsuleMinter is Script {
             IPermissionedResolver(resolver),
             parentNode,
             parentDns,
-            duration
+            duration,
+            schemaUri
         );
 
         IPermissionedRegistry(registry).grantRootRoles(ROLE_REGISTRAR, address(minter));
@@ -49,6 +54,10 @@ contract DeployCapsuleMinter is Script {
         vm.stopBroadcast();
 
         console.log("CapsuleMinter:", address(minter));
+        // The ENSIP-25 `<registry>` half. Derived from block.chainid and address(this),
+        // so it is new with every deployment — RECORDS.md's worked example must be
+        // updated to whatever this prints.
+        console.log("ERC-7930 registry:", minter.REGISTRY_INTEROP_ADDRESS());
         console.log("registrar role granted:", IPermissionedRegistry(registry).hasRoles(0, ROLE_REGISTRAR, address(minter)));
     }
 }

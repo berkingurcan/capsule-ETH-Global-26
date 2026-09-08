@@ -21,12 +21,13 @@
  *
  * Spec: ../../Branding-ENSClaw/RECORDS.md
  *
- * ⚠️ Phase 1: the four keys that already exist on chain still hold their DOTTED
- * values. Names minted against CapsuleMinter 0xe609aE… carry `agent.model` and
- * friends, and renaming here without redeploying would silently break every
- * live capsule. The kebab-case rename is Phase 2, and it happens in this file,
- * its twin, and CapsuleMinter.sol in one commit. Keys marked NEW have never
- * been written, so they carry their final ENSIP values already.
+ * Every attribute is kebab-case, because ENSIP-27 requires it of schema
+ * attributes and reserves dot notation for ENSIP-5 namespacing. Parameters go in
+ * square brackets, which ENSIP-26 and ENSIP-27 both define, so a client that
+ * understands the notation can enumerate protocols it has never heard of.
+ *
+ * Names minted before 2026-09-08 carry the dotted spellings (`agent.model` and
+ * friends) and are NOT migrated — they are testnet names on a superseded minter.
  */
 
 /**
@@ -36,24 +37,24 @@
  * chain. Never inline a value from this table — import the key.
  */
 export const RECORD_KEYS = {
-  /** ENSIP-27 node classification. NEW. */
+  /** ENSIP-27 node classification. */
   class: "class",
-  /** ENSIP-27 pointer to the JSON Schema for our own keys. NEW. */
+  /** ENSIP-27 pointer to the JSON Schema for our own keys. */
   schema: "schema",
-  /** ENSIP-26 free-form description of the agent. NEW. */
+  /** ENSIP-26 free-form description of the agent. */
   context: "agent-context",
-  /** ENSIP-26. The human-facing interface — for a capsule, the Telegram bot. NEW. */
+  /** ENSIP-26. The human-facing interface — for a capsule, the Telegram bot. */
   endpointWeb: "agent-endpoint[web]",
-  /** ENSIP-26 syntax, our own protocol tag. The control plane. Phase 2 → "agent-endpoint[capsule]". */
-  endpointCapsule: "agent.endpoint",
-  /** Our schema. Phase 2 → "agent-model". */
-  model: "agent.model",
-  /** Our schema. `openclaw`. NEW. */
+  /** ENSIP-26 syntax, our own protocol tag. The control plane. */
+  endpointCapsule: "agent-endpoint[capsule]",
+  /** Our schema. e.g. `claude-opus-5`. */
+  model: "agent-model",
+  /** Our schema. `openclaw`. */
   runtime: "agent-runtime",
-  /** Our schema. A pointer such as `cap_8f3d1a`, never the prompt body. Phase 2 → "agent-prompt". */
-  prompt: "agent.prompt",
-  /** Our schema. The only key the agent may write. Phase 2 → "agent-heartbeat". */
-  heartbeat: "agent.heartbeat",
+  /** Our schema. A pointer such as `cap_8f3d1a`, never the prompt body. */
+  prompt: "agent-prompt",
+  /** Our schema. The only key the agent may write. */
+  heartbeat: "agent-heartbeat",
 } as const;
 
 export type RecordKeyName = keyof typeof RECORD_KEYS;
@@ -118,13 +119,18 @@ export const OWN_SCHEMA_KEYS = [
  *
  * `registry` is the minter as an ERC-7930 interoperable address, `agentId` its
  * `tokenId` in decimal. Both halves come off the chain — `registry` from
- * `CapsuleMinter.registrationKey()` (Phase 2), which derives it from
- * `block.chainid` and `address(this)` so it survives a redeploy. Never hardcode
- * the result: it changes every time the minter is redeployed.
+ * `CapsuleMinter.REGISTRY_INTEROP_ADDRESS()`, which the contract derives at
+ * construction from `block.chainid` and `address(this)` so it survives a
+ * redeploy. Never hardcode the result: it changes every time the minter is
+ * redeployed. `CapsuleMinter.registrationKey(tokenId)` returns the whole string
+ * if you would rather not build it here.
  */
 export function registrationKey(erc7930Registry: string, agentId: string | bigint): string {
   return `agent-registration[${erc7930Registry}][${agentId}]`;
 }
+
+/** The ENSIP-25 record value. Non-empty is all the spec asks; presence is the claim. */
+export const REGISTRATION_VALUE = "1";
 
 /**
  * The heartbeat value: a monotonic counter, never a timestamp.

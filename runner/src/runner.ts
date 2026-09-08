@@ -21,6 +21,7 @@ import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked } from "./halt.js";
 import { probeHeartbeat } from "./heartbeat.js";
+import { HEARTBEAT_KEY } from "./records.js";
 import { PromptCache, PromptError } from "./prompt.js";
 import { describeSecret } from "./secret.js";
 
@@ -169,14 +170,14 @@ async function main() {
       console.log(`✅ ${stamp()}  tick ${ticks} · authorized · ${secs(Date.now() - startedAt)}`);
     } catch (error) {
       if (classifyHeartbeatFailure(error) === "revoked") {
-        console.log(`🔴 ${stamp()}  denied — setText(agent.heartbeat) refused by the resolver`);
+        console.log(`🔴 ${stamp()}  denied — setText(${HEARTBEAT_KEY}) refused by the resolver`);
 
         // The revert names the name-level resource whichever key was denied,
         // so ask the role table directly before concluding anything.
         const { revoked, roles } = await confirmRevoked(client, config, account.address);
 
         if (revoked) {
-          console.log(`🔴 confirmed  no ROLE_SET_TEXT on agent.heartbeat, and none via the wildcard`);
+          console.log(`🔴 confirmed  no ROLE_SET_TEXT on ${HEARTBEAT_KEY}, and none via the wildcard`);
           console.log(`🔴 halted     ${config.name} · ${ticks} ticks this run · 0 transactions`);
           // Nothing to write on the way out: the one record this agent could
           // touch is the one it has just been locked out of. Its silence is

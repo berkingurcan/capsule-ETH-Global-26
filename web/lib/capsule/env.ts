@@ -94,7 +94,7 @@ export type ServerEnv = {
   /** e.g. "capsulefleet.eth" — every capsule is a label under this. */
   parentName: string;
   /**
-   * The origin written into `agent.endpoint` at mint time, and therefore the
+   * The origin written into `agent-endpoint[capsule]` at mint time, and therefore the
    * URL a booted runner will call for its prompt. On Vercel this is the
    * deployment's own public URL; it is NOT derivable at runtime in a way we
    * would want to trust, so it is configured.

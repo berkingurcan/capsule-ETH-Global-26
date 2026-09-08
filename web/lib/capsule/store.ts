@@ -67,7 +67,7 @@ export type StoredPrompt = {
 /**
  * Seals a prompt and returns the pointer to write on chain.
  *
- * Called before the mint, because `mint()` writes agent.prompt in the same
+ * Called before the mint, because `mint()` writes agent-prompt in the same
  * transaction that creates the name. The row is therefore unreachable until
  * the mint lands: the prompt service authorises against the name's addr
  * record, which does not resolve yet. No extra state is needed to express

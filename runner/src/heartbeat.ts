@@ -59,7 +59,7 @@ export class HeartbeatRevertedError extends Error {
  * probed is real and revocable; the agent simply checks it rather than
  * spending gas to exercise it.
  *
- * The consequence worth knowing: agent.heartbeat never advances on chain, so
+ * The consequence worth knowing: agent-heartbeat never advances on chain, so
  * an on-chain "last seen" is not available. The owner's revocation event is,
  * and that is the one the subgraph in build step 5 cares about.
  *

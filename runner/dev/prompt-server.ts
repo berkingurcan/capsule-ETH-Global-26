@@ -30,7 +30,7 @@ const PROMPTS: Record<string, string> = {
     "If you do not have the data to answer, say so plainly rather than guessing.",
     "You know your own name and the records that configure you; you cannot change them.",
   ].join(" "),
-  // A second persona to switch to. Point agent.prompt at this one on chain and
+  // A second persona to switch to. Point agent-prompt at this one on chain and
   // the next tick makes the same running container a different agent — the
   // 0:50 beat in the demo script, with no redeploy anywhere.
   cap_7b21e9: [

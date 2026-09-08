@@ -1,7 +1,7 @@
 /**
  * GET /api/prompt/:ref — the cloakroom.
  *
- * `agent.prompt` on chain is a claim check like "cap_8f3d1a". This hands back
+ * `agent-prompt` on chain is a claim check like "cap_8f3d1a". This hands back
  * what it stands for, to the one caller entitled to it.
  *
  * There are no API keys in this system. The provisioner never issues a

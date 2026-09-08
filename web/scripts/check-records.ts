@@ -21,7 +21,14 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
-import { CLASS_VALUE, OWN_SCHEMA_KEYS, RECORD_KEYS, type RecordKeyName } from "../lib/capsule/records";
+import {
+  CLASS_VALUE,
+  OWN_SCHEMA_KEYS,
+  RECORD_KEYS,
+  REGISTRATION_VALUE,
+  registrationKey,
+  type RecordKeyName,
+} from "../lib/capsule/records";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webCopy = resolve(here, "../lib/capsule/records.ts");
@@ -33,20 +40,16 @@ const checks: Check[] = [];
 const expect = (name: string, ok: boolean, detail: string) => checks.push({ name, ok, detail });
 
 /**
- * Keys still carrying their pre-ENSIP dotted spelling because live names on the
- * deployed minter (0xe609aE…) carry them. Renaming before that redeploy would
- * lock every running agent out of its own heartbeat.
+ * Keys exempted from the ENSIP-27 attribute check while they still carry a
+ * pre-ENSIP spelling on a live deployment.
  *
- * Phase 2 renames them and empties this list. The list is self-cleaning: a key
- * in here that already conforms is reported as drift, so it cannot rot into a
- * permanent exemption for a rename that actually happened.
+ * Empty since Phase 2: the kebab-case rename shipped with a new minter, and
+ * names on the old one are not migrated. Kept, not deleted, because the same
+ * situation recurs on the next spec change — and because the list is
+ * self-cleaning: a key in here that already conforms is reported as drift, so
+ * an exemption cannot outlive the rename it was covering.
  */
-const PENDING_RENAME = new Set<string>([
-  "agent.model",
-  "agent.prompt",
-  "agent.heartbeat",
-  "agent.endpoint",
-]);
+const PENDING_RENAME = new Set<string>([]);
 
 /** Like expect, but a known-pending key is reported rather than failing the run. */
 const expectConformance = (name: string, key: string, ok: boolean, detail: string) => {
@@ -160,11 +163,40 @@ for (const key of OWN_SCHEMA_KEYS) {
 }
 
 // ---------------------------------------------------------------------------
+// 4. ENSIP-25: the registration key is built the same way in both languages.
+//
+// It is the one key neither side stores as a constant — Solidity concatenates it
+// from the ERC-7930 registry address, TypeScript from a template literal. If the
+// two prefixes ever diverge, a client verifying the name reads an empty record
+// and concludes the agent is unregistered.
+// ---------------------------------------------------------------------------
+const solidityRegistrationPrefix = /"(agent-registration\[)"/.exec(solidity);
+const tsRegistrationPrefix = registrationKey("<r>", "<a>").slice(0, "agent-registration[".length);
+expect(
+  "registration key prefix",
+  solidityRegistrationPrefix !== null && solidityRegistrationPrefix[1] === tsRegistrationPrefix,
+  `solidity "${solidityRegistrationPrefix?.[1] ?? "<missing>"}" vs ts "${tsRegistrationPrefix}"`,
+);
+
+expect(
+  "registration key shape",
+  registrationKey("0xdead", 7n) === "agent-registration[0xdead][7]",
+  `got "${registrationKey("0xdead", 7n)}"`,
+);
+
+const solidityRegistrationValue = /string internal constant REGISTRATION_VALUE = "([^"]*)";/.exec(solidity);
+expect(
+  "registration value",
+  solidityRegistrationValue !== null && solidityRegistrationValue[1] === REGISTRATION_VALUE,
+  `solidity "${solidityRegistrationValue?.[1] ?? "<missing>"}" vs ts "${REGISTRATION_VALUE}" (ENSIP-25 requires non-empty)`,
+);
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 for (const c of checks) {
   if (c.pending === true) {
-    console.log(`  pend  ${c.name} — dotted until the Phase 2 rename and redeploy`);
+    console.log(`  pend  ${c.name} — exempt, see PENDING_RENAME`);
   } else if (c.ok) {
     console.log(`  ok    ${c.name}`);
   } else {
@@ -183,5 +215,5 @@ if (failed > 0) {
 const pending = checks.filter((c) => c.pending === true).length;
 console.log(`\nrecord keys agree across Solidity, runner and web (${checks.length} checks)`);
 if (pending > 0) {
-  console.log(`${pending} key(s) awaiting the Phase 2 kebab-case rename — see PENDING_RENAME.`);
+  console.log(`${pending} key(s) exempt from the ENSIP-27 attribute check — see PENDING_RENAME.`);
 }

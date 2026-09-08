@@ -311,9 +311,53 @@ from the record.
 Worth stating because the UI mock (`web/components/AgentDetail.tsx`) has carried a unix
 timestamp in this field since before the decision. The spec is right; the mock is wrong.
 
+### 12. The nine-record mint costs about twice the three-record one, and that is fine
+
+Phase 2 took `mint()` from 3 `setText` calls to 9 plus `setAddr`, `register` and two
+authorizations. Measured before committing to the redeploy, because finding the ceiling
+on a live mint is the expensive way to find it:
+
+| | mocks (`forge test --gas-report`, median) | live `cast estimate` on 0xe609aE… |
+|---|---|---|
+| 3 records (Phase 1) | 501,956 | 489,822 |
+| 9 records (Phase 2) | 954,122 | — not deployed yet |
+
+The mock is within 2.5% of the real resolver on the shape we can measure both ways,
+which is the only reason the 954k number is worth quoting. Roughly +450k for six more
+records, ~75k each — dominated by cold `SSTORE`s on the string slots, so it scales with
+the record *values*, not the key names. `agent-context` is the long one.
+
+The plan held open the option of splitting `class` and `schema` into a second
+provisioner call. Not needed: ~950k is an ordinary NFT-with-metadata mint and nowhere
+near a block limit. Left as one transaction, which is also the demo claim — one
+signature, one name, fully configured.
+
+### 13. `mint()`'s event carries no record values any more
+
+`CapsuleMinted` used to repeat `model`, `endpoint` and `promptPointer` as log data.
+With nine records that would have meant paying for the same strings twice, since
+`PermissionedResolver` already emits its own event per `setText`. The event is now
+`(node, owner, agent, tokenId, label, expiry)` — the identity, not the config. An
+indexer that wants the config reads the resolver's logs or the records themselves.
+
+If you are reading an old log: the topic0 changed with the signature.
+
+### 14. `REGISTRY_INTEROP_ADDRESS` is derived, never configured
+
+The ENSIP-25 key needs this contract as an ERC-7930 interoperable address. It is built
+in the constructor from `block.chainid` and `address(this)`, so a deployment cannot be
+given the wrong one, and it changes on every redeploy. Two things follow:
+
+- The worked example in `../../Branding-ENSClaw/RECORDS.md` is a *fixture*, not a
+  constant. `DeployCapsuleMinter` prints the new one; update RECORDS.md from that.
+- The chain reference is length-prefixed and must be minimal — `0xaa36a7` for Sepolia,
+  not `0x0000aa36a7`. A padded reference encodes the same chain as a different string,
+  and therefore a different record key, which resolves to empty. `interopAddressOf` is
+  `public pure` precisely so the fixture can be checked against it without a deployment.
+
 ## Next
 
 Step 3 of the build plan: the runner. It resolves its own name through
-`UniversalResolverV2`, writes `agent.heartbeat` on a timer, and **halts itself** when that
+`UniversalResolverV2`, writes `agent-heartbeat` on a timer, and **halts itself** when that
 write reverts with `EACUnauthorizedAccountRoles`. The revert is already reproducible by
 hand, so the runner has a known-good failure to catch.

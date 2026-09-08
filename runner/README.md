@@ -7,16 +7,16 @@ be that, and shuts itself down when the answer becomes no.
 ```
 CAPSULE_NAME=analyst.capsulefleet.eth
         ↓
-addr           who this agent is        → refuses to boot if it is not us
-agent.model    which brain              → swap it on chain, no redeploy
-agent.endpoint where the prompt lives
-agent.prompt   cap_8f3d1a               → a pointer; the body stays off chain
-agent.heartbeat the one key it may write → and the one it is probed against
+addr                     who this agent is        → refuses to boot if it is not us
+agent-model              which brain              → swap it on chain, no redeploy
+agent-endpoint[capsule]  where the prompt lives
+agent-prompt             cap_8f3d1a               → a pointer; the body stays off chain
+agent-heartbeat          the one key it may write → and the one it is probed against
 ```
 
 **No transactions.** The authorization probe is an `eth_call`, so an agent needs
 a key and nothing else — no funded wallet, and no funding pipeline behind it.
-The trade is that `agent.heartbeat` never advances on chain, so there is no
+The trade is that `agent-heartbeat` never advances on chain, so there is no
 on-chain last-seen; the owner's revocation event carries the fact that matters.
 
 ## Environment
@@ -87,14 +87,14 @@ DNS=0x07616e616c7973740c63617073756c65666c6565740365746800
 ```bash
 cast send --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
   $CAPSULE_RESOLVER "authorizeTextRoles(bytes,string,address,bool)" \
-  $DNS "agent.heartbeat" $AGENT_ADDRESS false
+  $DNS "agent-heartbeat" $AGENT_ADDRESS false
 ```
 
 **3. Within one tick:**
 
 ```
-🔴 denied     setText(agent.heartbeat) refused by the resolver
-🔴 confirmed  no ROLE_SET_TEXT on agent.heartbeat, and none via the wildcard
+🔴 denied     setText(agent-heartbeat) refused by the resolver
+🔴 confirmed  no ROLE_SET_TEXT on agent-heartbeat, and none via the wildcard
 🔴 halted     analyst.capsulefleet.eth · N ticks this run · 0 transactions
 runner halted
 ```
@@ -119,7 +119,7 @@ denied write through `cast send` reports only "failed to estimate gas".
 
 ```bash
 cast call --rpc-url $SEPOLIA_RPC_URL --from $ADDRESS \
-  $CAPSULE_RESOLVER "setText(bytes32,string,string)" $NODE "agent.prompt" "cap_7b21e9"
+  $CAPSULE_RESOLVER "setText(bytes32,string,string)" $NODE "agent-prompt" "cap_7b21e9"
 ```
 
 Then send it, and within one tick:
@@ -137,7 +137,7 @@ the name-level one, so every denied write on a name reports the same resource
 id whichever key you were actually refused on. Ask the role table instead:
 
 ```bash
-RES=$(cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent.heartbeat')))
+RES=$(cast keccak $(cast abi-encode 'f(bytes32,bytes32)' $NODE $(cast keccak 'agent-heartbeat')))
 cast call $CAPSULE_RESOLVER "hasRoles(uint256,uint256,address)(bool)" $(cast to-dec $RES) 16 $AGENT_ADDRESS
 ```
 

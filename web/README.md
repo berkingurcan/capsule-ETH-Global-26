@@ -25,7 +25,7 @@ The point of the product is that **the name is the agent**, so the interface has
 make that visible rather than claim it:
 
 - **The record is the settings screen.** On `/fleet/[label]` the config table *is*
-  the ENS record, and every row says who may write it. Only `agent.heartbeat`
+  the ENS record, and every row says who may write it. Only `agent-heartbeat`
   belongs to the agent.
 - **The heartbeat is the liveness indicator.** The runner writes to its own name
   every 60 seconds, and that write needs an EAC role. The counter on each card is
