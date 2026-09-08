@@ -140,12 +140,27 @@ export function buildOpenClawConfig(
       defaults: {
         model: { primary: config.model },
         workspace: WORKSPACE_PATH,
-        // The name published one persona. Let the gateway generate a second one
-        // beside it and the agent is partly itself and partly OpenClaw's
-        // default — which is not what `agent-prompt` says it is. AGENTS.md is
-        // written by the supervisor and is not in this list, because it is the
-        // one bootstrap file that must exist.
-        skipOptionalBootstrapFiles: ["SOUL.md", "USER.md", "IDENTITY.md"],
+        // Suppress OpenClaw's entire workspace bootstrap, `BOOTSTRAP.md` above
+        // all. That file is a "birth sequence" the gateway seeds into any fresh
+        // workspace, and its first instruction is: *introduce yourself as the
+        // user's new assistant, then ask what they would like to call you.*
+        //
+        // Measured, not theorised. A capsule booted with it answered its owner
+        // with "Hello Berkin. I'm your new assistant — what would you like to
+        // call me?" while `AGENTS.md` on disk held the persona its name
+        // published. The birth ritual competed with `agent-prompt` and won.
+        //
+        // For this project that is the worst possible reply. The whole claim is
+        // that a name arrives already knowing what it is; an agent that opens by
+        // asking to be named has contradicted it in one sentence, in front of
+        // the person who paid a transaction to name it.
+        //
+        // `skipOptionalBootstrapFiles` cannot do this — it takes only SOUL.md,
+        // USER.md and IDENTITY.md, and explicitly still writes AGENTS.md and
+        // BOOTSTRAP.md. `skipBootstrap` suppresses all five. AGENTS.md is
+        // unaffected because the supervisor writes it before the spawn: this
+        // disables the gateway *creating* bootstrap files, not reading them.
+        skipBootstrap: true,
       },
     },
   };
