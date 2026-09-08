@@ -92,6 +92,10 @@ export const aad = {
   prompt: (ref: string, capsuleName: string) => `capsule_prompt:${ref}:${capsuleName}`,
   agent: (capsuleName: string, agentAddress: string) =>
     `capsule_agent:${capsuleName}:${agentAddress.toLowerCase()}`,
+  // Binds a credential to both the capsule and the slot. Moving a sealed
+  // provider key to another capsule, or to another provider's row on the same
+  // capsule, produces a row that will not open.
+  secret: (capsuleName: string, slot: string) => `capsule_secret:${capsuleName}:${slot}`,
 };
 
 /** Constant-time compare, for anywhere a secret is checked against user input. */

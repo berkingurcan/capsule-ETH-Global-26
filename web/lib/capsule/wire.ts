@@ -32,6 +32,24 @@ export function promptFetchMessage(name: string, promptRef: string, timestamp: n
   return [PROMPT_FETCH_PREFIX, name, promptRef, String(timestamp)].join("\n");
 }
 
+/**
+ * The credential fetch. CANONICAL SOURCE: runner/src/runtime.ts
+ *
+ * A separate domain separator, not a second parameter on the first one: a
+ * signature captured for the prompt path must not open the credential path.
+ * The prompt is the agent's instructions and is bad to leak; the provider key is
+ * the owner's money and is worse.
+ *
+ * The message names no resource. The prompt fetch quotes a ref the caller read
+ * off the chain; this one asks only "as this name, at this moment", and the
+ * service reads `agent-model` itself to decide what that entitles the caller to.
+ */
+export const RUNTIME_FETCH_PREFIX = "capsule-runtime-fetch";
+
+export function runtimeFetchMessage(name: string, timestamp: number): string {
+  return [RUNTIME_FETCH_PREFIX, name, String(timestamp)].join("\n");
+}
+
 export function isTimestampFresh(timestamp: number, now = Math.floor(Date.now() / 1000)): boolean {
   const age = now - timestamp;
   return age <= SIGNATURE_TTL_SECONDS && age >= -CLOCK_SKEW_SECONDS;

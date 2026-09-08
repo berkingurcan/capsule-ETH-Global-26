@@ -22,6 +22,7 @@ import {
 } from "viem";
 import { namehash, normalize, packetToBytes } from "viem/ens";
 import { resolverAbi, universalResolverAbi, UNIVERSAL_RESOLVER_V2 } from "./chain";
+import { RECORD_KEYS } from "./records";
 
 export type NameEncoding = { name: string; node: Hex; dnsName: Hex };
 
@@ -82,4 +83,54 @@ export async function readText(
       : decodeFunctionResult({ abi: resolverAbi, functionName: "text", data: result });
 
   return { value, resolver };
+}
+
+/**
+ * `addr` and `agent-model`, in one round trip.
+ *
+ * The runtime route needs both and needs them to describe the same instant: it
+ * authorises against `addr` and then decides which provider credential to hand
+ * over based on `agent-model`. Two separate reads could straddle a `setText`
+ * and answer for two different configurations of the same name — which would
+ * mean handing a runner the key for a model its record no longer names.
+ *
+ * `allowFailure: false` because both records are required for the decision.
+ * There is no useful half-answer here, and the caller already distinguishes "we
+ * could not perform the check" from "the check failed".
+ */
+export async function readIdentity(
+  client: PublicClient,
+  name: string,
+): Promise<{ address: Address; model: string; resolver: Address }> {
+  const { node, dnsName } = encodeName(name);
+
+  const calls = [
+    encodeFunctionData({ abi: resolverAbi, functionName: "addr", args: [node] }),
+    encodeFunctionData({ abi: resolverAbi, functionName: "text", args: [node, RECORD_KEYS.model] }),
+  ];
+
+  const results = await client.multicall({
+    contracts: calls.map((data) => ({
+      address: UNIVERSAL_RESOLVER_V2,
+      abi: universalResolverAbi,
+      functionName: "resolve" as const,
+      args: [dnsName, data] as const,
+    })),
+    allowFailure: false,
+  });
+
+  const [addrData, addrResolver] = results[0] as readonly [Hex, Address];
+  const [modelData] = results[1] as readonly [Hex, Address];
+
+  const address =
+    addrData === "0x"
+      ? zeroAddress
+      : decodeFunctionResult({ abi: resolverAbi, functionName: "addr", data: addrData });
+
+  const model =
+    modelData === "0x"
+      ? ""
+      : decodeFunctionResult({ abi: resolverAbi, functionName: "text", data: modelData });
+
+  return { address, model, resolver: addrResolver };
 }

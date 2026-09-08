@@ -12,7 +12,7 @@ export type Role = {
   title: string;
   blurb: string;
   cap: string; // cap colour of the capsule mark
-  model: string;
+  model: string; // `<provider>/<model>` — the value of the agent-model record
   tools: string[];
   prompt: string;
   taken?: boolean;
@@ -62,7 +62,7 @@ export const ROLES: Role[] = [
     title: "Trader",
     blurb: "Watches a pair, explains the trade it would make.",
     cap: "#FFC42E",
-    model: "claude-opus-5",
+    model: "anthropic/claude-opus-5",
     tools: ["price", "swap", "notify"],
     prompt:
       "You watch ETH/USDC on Base. Every 15 minutes, check the price and tell me in one line whether you would buy, sell or wait, and why.",
@@ -72,7 +72,7 @@ export const ROLES: Role[] = [
     title: "Dev",
     blurb: "Reads the repo, drafts pull requests.",
     cap: "#8CF0B4",
-    model: "claude-opus-5",
+    model: "openai/gpt-5.6-sol",
     tools: ["repo", "diff", "notify"],
     prompt:
       "You watch the capsule repo. Summarise new commits and flag anything that touches the minter contract.",
@@ -82,7 +82,7 @@ export const ROLES: Role[] = [
     title: "Marketing",
     blurb: "Drafts and schedules posts.",
     cap: "#FF4D8D",
-    model: "claude-sonnet-5",
+    model: "google/gemini-3.1-pro-preview",
     tools: ["draft", "schedule", "notify"],
     prompt:
       "You write short launch posts in the Capsule voice: plain, concrete, no hype words.",
@@ -92,7 +92,7 @@ export const ROLES: Role[] = [
     title: "Research",
     blurb: "Summarises sources on demand.",
     cap: "#6E95F0",
-    model: "claude-sonnet-5",
+    model: "deepseek/deepseek-v4-flash",
     tools: ["search", "read", "notify"],
     prompt: "You answer questions with sources. Never guess a number.",
   },
@@ -101,7 +101,7 @@ export const ROLES: Role[] = [
     title: "Support",
     blurb: "Answers in your Telegram group.",
     cap: "#C4D5F6",
-    model: "claude-haiku-4-5",
+    model: "anthropic/claude-haiku-4-5",
     tools: ["faq", "notify"],
     prompt: "You answer product questions. Escalate anything about money.",
     taken: true,
@@ -116,7 +116,7 @@ export const AGENTS: Agent[] = [
     cap: "#FFC42E",
     status: "running",
     addr: "0x7a2f19c4b8e05d3a6f21c9e4b70d8a5f3c1e6b09",
-    model: "claude-opus-5",
+    model: "anthropic/claude-opus-5",
     tools: ["price", "swap", "notify"],
     prompt:
       "You watch ETH/USDC on Base. Every 15 minutes, check the price and tell me in one line whether you would buy, sell or wait, and why.",
@@ -135,8 +135,8 @@ export const AGENTS: Agent[] = [
     history: [60, 60, 61, 60, 60, 60, 62, 60, 60, 59, 60, 60],
     logs: [
       "resolved trader.berkin.eth · 6 records",
-      "model=claude-opus-5 tools=price,swap,notify",
-      "secrets cap_8f3d1a unsealed · telegram bot online",
+      "agent-model=anthropic/claude-opus-5 tools=price,swap,notify",
+      "ANTHROPIC_API_KEY loaded · openclaw gateway up · telegram bot online",
       "heartbeat written · block 7412883",
       "ETH/USDC 3,214.80 · would wait — range still tight",
       "x402 → dev.berkin.eth · 0.10 USDC · 200 OK",
@@ -150,7 +150,7 @@ export const AGENTS: Agent[] = [
     cap: "#8CF0B4",
     status: "running",
     addr: "0x2e91d7f3a05c48b6e2d1097fa3c85b41d9e0762c",
-    model: "claude-opus-5",
+    model: "openai/gpt-5.6-sol",
     tools: ["repo", "diff", "notify"],
     prompt:
       "You watch the capsule repo. Summarise new commits and flag anything that touches the minter contract.",
@@ -182,7 +182,7 @@ export const AGENTS: Agent[] = [
     cap: "#FF4D8D",
     status: "booting",
     addr: "0xc40b8e175d29a3f6b0148ce27d95a3f1082be64d",
-    model: "claude-sonnet-5",
+    model: "google/gemini-3.1-pro-preview",
     tools: ["draft", "schedule", "notify"],
     prompt:
       "You write short launch posts in the Capsule voice: plain, concrete, no hype words.",
@@ -212,7 +212,7 @@ export const AGENTS: Agent[] = [
     cap: "#C4D5F6",
     status: "recalled",
     addr: "0x8d6104ea72bc395f0a2e8d47163cb95207fe4a18",
-    model: "claude-sonnet-5",
+    model: "deepseek/deepseek-v4-flash",
     tools: ["search", "read", "notify"],
     prompt: "You answer questions with sources. Never guess a number.",
     endpoint: "https://research-berkin.fly.dev",

@@ -29,10 +29,20 @@ import {
   registrationKey,
   type RecordKeyName,
 } from "../lib/capsule/records";
+import {
+  PROVIDERS,
+  PROVIDER_IDS,
+  envVarFor,
+  parseModelRef,
+  providerFromSlot,
+  providerSlot,
+} from "../lib/capsule/providers";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const webCopy = resolve(here, "../lib/capsule/records.ts");
 const runnerCopy = resolve(here, "../../runner/src/records.ts");
+const webProviders = resolve(here, "../lib/capsule/providers.ts");
+const runnerProviders = resolve(here, "../../runner/src/providers.ts");
 const minterSource = resolve(here, "../../contracts/src/CapsuleMinter.sol");
 
 type Check = { name: string; ok: boolean; detail: string; pending?: boolean };
@@ -71,22 +81,28 @@ const expectConformance = (name: string, key: string, ok: boolean, detail: strin
 // Stronger than comparing parsed values, and it catches a divergent comment —
 // which matters, because the comments are where the Phase 2 rename plan lives.
 // ---------------------------------------------------------------------------
-const webText = readFileSync(webCopy, "utf8");
-const runnerText = readFileSync(runnerCopy, "utf8");
+const assertIdentical = (label: string, webPath: string, runnerPath: string) => {
+  const webText = readFileSync(webPath, "utf8");
+  const runnerText = readFileSync(runnerPath, "utf8");
 
-if (webText === runnerText) {
-  expect("copies identical", true, "");
-} else {
+  if (webText === runnerText) {
+    expect(`${label} copies identical`, true, "");
+    return;
+  }
+
   const w = webText.split("\n");
   const r = runnerText.split("\n");
   let line = 0;
   while (line < Math.max(w.length, r.length) && w[line] === r[line]) line += 1;
   expect(
-    "copies identical",
+    `${label} copies identical`,
     false,
     `first difference at line ${line + 1}\n    web:    ${w[line] ?? "<eof>"}\n    runner: ${r[line] ?? "<eof>"}`,
   );
-}
+};
+
+assertIdentical("records.ts", webCopy, runnerCopy);
+assertIdentical("providers.ts", webProviders, runnerProviders);
 
 // ---------------------------------------------------------------------------
 // 2. Every key agrees with the Solidity constant that writes or authorizes it.
@@ -192,6 +208,64 @@ expect(
 );
 
 // ---------------------------------------------------------------------------
+// 5. The provider table, and the two parsers that must agree with it.
+//
+// `agent-model` is `<provider>/<model>` and the minter validates none of it, by
+// design — a new provider is a new row in providers.ts, never a redeploy. That
+// makes this script the only place the table is checked at all.
+// ---------------------------------------------------------------------------
+
+// Splitting on the first separator, not on every one. Several real references
+// carry more than one, and keeping [0] and [1] yields a provider that exists and
+// a model that does not — an unknown-model failure three layers from its cause.
+const MULTI_SEGMENT = "openrouter/anthropic/claude-sonnet-4-6";
+const multi = parseModelRef(MULTI_SEGMENT);
+expect(
+  "model ref splits on the first separator",
+  multi?.provider === "openrouter" && multi?.model === "anthropic/claude-sonnet-4-6",
+  `"${MULTI_SEGMENT}" parsed as provider "${multi?.provider}" model "${multi?.model}"`,
+);
+
+for (const malformed of ["", "claude-opus-5", "/claude-opus-5", "anthropic/"]) {
+  expect(
+    `model ref rejects "${malformed}"`,
+    parseModelRef(malformed) === null,
+    `parsed instead of returning null`,
+  );
+}
+
+// Every example in the table has to survive the parser that will read it off the
+// chain, and has to name its own provider. An example that does not is a value an
+// owner will copy into a record that then fails to boot.
+for (const id of PROVIDER_IDS) {
+  const spec = PROVIDERS[id];
+  const parsed = parseModelRef(spec.example);
+  expect(
+    `${id} example parses`,
+    parsed !== null && parsed.provider === id,
+    `"${spec.example}" parsed as provider "${parsed?.provider ?? "<null>"}", expected "${id}"`,
+  );
+
+  // A lookup, never a derivation: `google` reads GEMINI_API_KEY. Deriving the
+  // variable from the id is right for six of these and wrong for the two that
+  // matter, and the wrong ones fail as an unauthenticated gateway.
+  expect(
+    `${id} env var`,
+    envVarFor(id) === spec.envVar && /^[A-Z][A-Z0-9_]*$/.test(spec.envVar),
+    `envVarFor("${id}") = "${envVarFor(id)}" vs table "${spec.envVar}"`,
+  );
+}
+
+// Slot round-trip. The prefix is what stops a provider literally called
+// "telegram" from colliding with the bot token in the same namespace.
+expect(
+  "provider slot round-trips",
+  providerFromSlot(providerSlot("deepseek")) === "deepseek" &&
+    providerFromSlot("telegram") === null,
+  `providerSlot/providerFromSlot disagree`,
+);
+
+// ---------------------------------------------------------------------------
 
 let failed = 0;
 for (const c of checks) {
@@ -213,7 +287,7 @@ if (failed > 0) {
   process.exit(1);
 }
 const pending = checks.filter((c) => c.pending === true).length;
-console.log(`\nrecord keys agree across Solidity, runner and web (${checks.length} checks)`);
+console.log(`\nrecord keys and providers agree across Solidity, runner and web (${checks.length} checks)`);
 if (pending > 0) {
   console.log(`${pending} key(s) exempt from the ENSIP-27 attribute check — see PENDING_RENAME.`);
 }

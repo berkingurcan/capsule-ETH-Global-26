@@ -33,7 +33,9 @@ import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked, type HeartbeatVerdict } from "./halt.js";
 import { LOW_BEATS, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
 import { HEARTBEAT_KEY } from "./records.js";
+import { Gateway, runtimeProblems } from "./openclaw.js";
 import { PromptCache, PromptError } from "./prompt.js";
+import { RuntimeError, describeCredentials, fetchRuntime, type RuntimeCredentials } from "./runtime.js";
 import { describeSecret } from "./secret.js";
 
 /** Consecutive transient failures before giving up. Reset by any success. */
@@ -100,8 +102,9 @@ async function reckon(args: {
   agent: Address;
   ticks: number;
   beats: number;
+  gateway: Gateway;
 }): Promise<HeartbeatVerdict> {
-  const { error, client, config, agent, ticks, beats } = args;
+  const { error, client, config, agent, ticks, beats, gateway } = args;
   const verdict = classifyHeartbeatFailure(error);
 
   if (verdict === "unfunded") {
@@ -131,6 +134,14 @@ async function reckon(args: {
   }
 
   console.log(`🔴 confirmed  no ROLE_SET_TEXT on ${HEARTBEAT_KEY}, and none via the wildcard`);
+
+  // Before anything else. A recall has to reach the thing the owner can actually
+  // see, and what they can see is a Telegram chat — an agent that keeps
+  // answering after its permission was pulled has not been recalled in any sense
+  // that matters to the person who pulled it.
+  await gateway.stop();
+  console.log(`🔴 gateway    stopped — the bot is offline`);
+
   console.log(
     `🔴 halted     ${config.name} · ${plural(ticks, "tick")}, ${plural(beats, "beat")} this run · last ${config.heartbeat.raw || "(never beaten)"}`,
   );
@@ -157,6 +168,10 @@ async function main() {
   const client = createRunnerClient(env.rpcUrl);
   const walletClient = createRunnerWallet(env.rpcUrl, account);
   const prompts = new PromptCache();
+  const gateway = new Gateway({
+    info: (message) => console.log(`   ${stamp()}  ${message}`),
+    warn: (message) => console.warn(`⚠️  ${stamp()}  ${message}`),
+  });
 
   // ---- boot: strict ----------------------------------------------------
   let config: CapsuleConfig;
@@ -172,6 +187,11 @@ async function main() {
   }
 
   const endpoint = env.endpointOverride ?? config.endpoint;
+
+  // The last credential set that loaded cleanly. Re-fetched only when the model
+  // reference on chain changes, for the same reason the prompt is: the record is
+  // the trigger, and an unchanged record means there is nothing to ask for.
+  let credentials: RuntimeCredentials;
 
   try {
     const { body } = await prompts.load({
@@ -189,6 +209,20 @@ async function main() {
     if (env.endpointOverride !== undefined) {
       console.log(`⚠️  endpoint   ${endpoint} (CAPSULE_ENDPOINT_OVERRIDE)`);
     }
+    credentials = await fetchRuntime({ endpoint, name: config.name, signer: account });
+    console.log(`   providers  ${describeCredentials(credentials)}`);
+
+    // Strict, because this is boot. A capsule whose very first model reference
+    // has no key behind it is misconfigured, and starting it would produce a
+    // machine that is up, heartbeating and unable to answer a single message —
+    // the most expensive way to discover a missing credential.
+    const problems = runtimeProblems(config, credentials);
+    if (problems.length > 0) {
+      for (const problem of problems) console.error(`❌ runtime    ${problem}`);
+      console.error("boot failed — runtime");
+      process.exit(1);
+    }
+
     const gas = await funding(client, account.address);
     console.log(
       gas.low
@@ -198,15 +232,30 @@ async function main() {
     console.log(
       `   heartbeat  ${config.heartbeat.raw || "(never beaten)"} · beat every ${env.heartbeatSeconds}s, probe every ${env.tickSeconds}s`,
     );
-    console.log("runner up");
   } catch (error) {
     if (error instanceof PromptError) {
       console.error(`❌ prompt     ${error.kind} — ${error.message}`);
       console.error("boot failed — prompt");
       process.exit(1);
     }
+    if (error instanceof RuntimeError) {
+      console.error(`❌ runtime    ${error.kind} — ${error.message}`);
+      console.error("boot failed — runtime");
+      process.exit(1);
+    }
     throw error;
   }
+
+  // The brain comes up last, once everything it needs has been proved present.
+  try {
+    await gateway.apply(config, credentials);
+    console.log(`   gateway    openclaw gateway · ${config.model}`);
+  } catch (error) {
+    console.error(`❌ gateway    ${error instanceof Error ? error.message : String(error)}`);
+    console.error("boot failed — gateway");
+    process.exit(1);
+  }
+  console.log("runner up");
 
   // ---- shutdown --------------------------------------------------------
   const shutdown = new AbortController();
@@ -217,6 +266,7 @@ async function main() {
       stopping = true;
       // A machine being moved between hosts must not read as a revocation.
       console.log(`\n   ${signal}    shutting down`);
+      void gateway.stop();
       shutdown.abort();
     });
   }
@@ -230,6 +280,12 @@ async function main() {
 
   // Beat on the first tick. A freshly booted agent has something to say.
   let nextBeatAt = Date.now();
+
+  // The model reference the gateway is actually running, which is not always the
+  // one on chain: a change the runtime cannot serve leaves the previous brain in
+  // place. Comparing against the record instead would re-apply a broken model
+  // every tick and log the same warning forever.
+  let liveModel = config.model;
 
   // The highest sequence this process has written. The per-tick config reload
   // is the only other source of it, and a node that has not caught up with our
@@ -269,6 +325,47 @@ async function main() {
         console.warn(`⚠️  ${stamp()}  prompt unreadable, keeping the last good — ${reason}`);
       }
 
+      // Change the record, change the brain. Same container, same machine id,
+      // same wallet, same heartbeat sequence — a different model answering the
+      // next message. This is the whole demo, and it is one comparison.
+      //
+      // Everything in here is forgiving. The owner is editing a live agent from
+      // a wallet, and every way that can go wrong — a typo, a provider they
+      // never stored a key for, a gateway that will not start on the new model
+      // — must leave the previous brain running and say so. A capsule that dies
+      // when its owner mistypes a model name is indistinguishable, on the
+      // dashboard, from one that was recalled, and this project's headline claim
+      // is that those two are never confused.
+      if (config.model !== liveModel) {
+        try {
+          const next = await fetchRuntime({
+            endpoint: env.endpointOverride ?? config.endpoint,
+            name: config.name,
+            signer: account,
+          });
+
+          const problems = runtimeProblems(config, next);
+          if (problems.length > 0) {
+            for (const problem of problems) {
+              console.warn(`⚠️  ${stamp()}  model ${config.model} not applied — ${problem}`);
+            }
+            console.warn(`⚠️  ${stamp()}  still running ${liveModel}`);
+          } else {
+            await gateway.apply(config, next);
+            credentials = next;
+            console.log(
+              `🔄 ${stamp()}  model ${liveModel} → ${config.model} · gateway restarted — this is a different brain now`,
+            );
+            liveModel = config.model;
+          }
+        } catch (error) {
+          const reason = error instanceof RuntimeError ? error.message : shortRevert(error);
+          console.warn(
+            `⚠️  ${stamp()}  model ${config.model} not applied, still running ${liveModel} — ${reason}`,
+          );
+        }
+      }
+
       const sequence = Math.max(config.heartbeat.sequence, written) + 1;
 
       if (Date.now() >= nextBeatAt) {
@@ -304,6 +401,7 @@ async function main() {
         agent: account.address,
         ticks,
         beats,
+        gateway,
       });
 
       if (verdict === "unfunded") {
@@ -343,6 +441,7 @@ async function main() {
     await sleep(Math.max(MIN_SLEEP_MS, tickMs - elapsed), shutdown.signal);
   }
 
+  await gateway.stop();
   console.log(`   stopped    ${plural(ticks, "tick")} · ${plural(beats, "beat")}`);
   process.exit(0);
 }

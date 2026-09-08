@@ -24,6 +24,7 @@ import { randomBytes } from "node:crypto";
 import type { Address, Hex } from "viem";
 import { aad, open, seal } from "./crypto";
 import type { ServerEnv } from "./env";
+import { TELEGRAM_SLOT, providerSlot } from "./providers";
 
 /** Attempts to find a free ref before giving up. Collisions are ~1 in 16.7M. */
 const REF_ATTEMPTS = 5;
@@ -199,3 +200,124 @@ export async function readAgent(
     privateKey,
   };
 }
+
+////////////////////////////////////////////////////////////////////////////
+// Credentials
+////////////////////////////////////////////////////////////////////////////
+
+/**
+ * Non-secret detail about how a custom provider is reached.
+ *
+ * Empty for a built-in provider, which needs no endpoint configuration at all:
+ * naming it in `agent-model` and putting its key in the gateway's environment is
+ * the whole setup.
+ */
+export type CredentialMeta = {
+  baseUrl?: string;
+  api?: string;
+};
+
+export type StoredSecret = {
+  capsuleName: string;
+  slot: string;
+  value: string;
+  meta: CredentialMeta;
+};
+
+/**
+ * Writes a secret, replacing whatever was in that slot.
+ *
+ * Unlike prompts, these are **not** append-only. A prompt is append-only because
+ * the pointer on chain must keep naming exactly one body, and rewriting a body
+ * in place would make the record lie about what the agent was told. A provider
+ * key has no on-chain pointer and no audit value — it is a credential, rotating
+ * one is the normal case, and keeping every previous key forever would be a
+ * liability rather than a record.
+ */
+export async function putSecret(
+  store: Store,
+  args: { capsuleName: string; slot: string; value: string; meta?: CredentialMeta },
+): Promise<void> {
+  const capsuleName = args.capsuleName.toLowerCase();
+  if (args.value.trim() === "") throw new StoreError(`${args.slot} value is empty`);
+
+  const sealed = seal(store.key, args.value, aad.secret(capsuleName, args.slot));
+  const meta = JSON.stringify(args.meta ?? {});
+
+  await store.sql`
+    insert into capsule_secret (capsule_name, slot, value_sealed, meta)
+    values (${capsuleName}, ${args.slot}, ${sealed}, ${meta}::jsonb)
+    on conflict (capsule_name, slot) do update
+      set value_sealed = excluded.value_sealed,
+          meta         = excluded.meta,
+          updated_at   = now()
+  `;
+}
+
+export async function readSecret(
+  store: Store,
+  args: { capsuleName: string; slot: string },
+): Promise<StoredSecret | null> {
+  const capsuleName = args.capsuleName.toLowerCase();
+
+  const rows = (await store.sql`
+    select capsule_name, slot, value_sealed, meta
+    from capsule_secret
+    where capsule_name = ${capsuleName} and slot = ${args.slot}
+  `) as { capsule_name: string; slot: string; value_sealed: string; meta: CredentialMeta }[];
+
+  const row = rows[0];
+  if (row === undefined) return null;
+
+  return {
+    capsuleName: row.capsule_name,
+    slot: row.slot,
+    value: open(store.key, row.value_sealed, aad.secret(row.capsule_name, row.slot)),
+    meta: row.meta ?? {},
+  };
+}
+
+/**
+ * Which slots a capsule has filled — names only, nothing decrypted.
+ *
+ * The launchpad's edit view needs to show "you have keys for anthropic and
+ * google" without any secret leaving Postgres, and the check is cheap enough to
+ * run on a page render.
+ */
+export async function listSecretSlots(
+  store: Store,
+  args: { capsuleName: string },
+): Promise<string[]> {
+  const capsuleName = args.capsuleName.toLowerCase();
+
+  const rows = (await store.sql`
+    select slot from capsule_secret
+    where capsule_name = ${capsuleName}
+    order by slot
+  `) as { slot: string }[];
+
+  return rows.map((row) => row.slot);
+}
+
+/** Convenience wrappers, so callers never assemble a slot string themselves. */
+export const secrets = {
+  putProviderKey: (
+    store: Store,
+    args: { capsuleName: string; provider: string; apiKey: string; meta?: CredentialMeta },
+  ) =>
+    putSecret(store, {
+      capsuleName: args.capsuleName,
+      slot: providerSlot(args.provider),
+      value: args.apiKey,
+      meta: args.meta,
+    }),
+
+  readProviderKey: (store: Store, args: { capsuleName: string; provider: string }) =>
+    readSecret(store, { capsuleName: args.capsuleName, slot: providerSlot(args.provider) }),
+
+  putTelegramToken: (store: Store, args: { capsuleName: string; token: string }) =>
+    putSecret(store, { capsuleName: args.capsuleName, slot: TELEGRAM_SLOT, value: args.token }),
+
+  readTelegramToken: (store: Store, args: { capsuleName: string }) =>
+    readSecret(store, { capsuleName: args.capsuleName, slot: TELEGRAM_SLOT }),
+};

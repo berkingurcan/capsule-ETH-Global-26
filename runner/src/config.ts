@@ -30,6 +30,7 @@ import {
   TEXT_KEYS,
   parseHeartbeatSequence,
 } from "./records.js";
+import { modelRefProblems, parseModelRef, type ModelRef } from "./providers.js";
 
 // Re-exported so the rest of the runner keeps importing it from here, which is
 // where it has always lived. The string itself is now defined once, in records.ts.
@@ -50,11 +51,20 @@ export type CapsuleConfig = {
   /** The `addr` record. Verified to be this runner's own address. */
   agent: Address;
   /**
-   * Opaque to the runner. Which SDK actually serves it is the brain's problem;
-   * dispatch on this string there, and a new provider is a new row in a map
-   * rather than a contract change. Swapping the value on chain is one setText.
+   * `<provider>/<model>` — OpenClaw's own model-reference syntax, handed to the
+   * gateway verbatim as `agents.defaults.model.primary`. Still opaque to the
+   * chain: the minter writes it as a string and validates nothing, so a new
+   * provider is a new row in `providers.ts` rather than a contract redeploy.
+   * Swapping the value on chain is one setText, and the agent becomes a
+   * different brain in the same container.
    */
   model: string;
+  /**
+   * The same value, split. Parsed here rather than at each use so a malformed
+   * reference is caught by the one function that already knows the difference
+   * between "the owner misconfigured this" and "the chain is unwell".
+   */
+  modelRef: ModelRef;
   endpoint: string;
   /** A pointer such as "cap_8f3d1a". Never the prompt body — that stays off chain. */
   promptRef: string;
@@ -171,6 +181,19 @@ export async function loadCapsuleConfig(
     if (text[key] === "") problems.push(`${key} — not set on this name`);
   }
 
+  // The model reference has to be readable before anything downstream can act on
+  // it. Note where this lands: a ConfigError is fatal at boot and survivable in
+  // the loop, because the loop keeps the last good config and warns. An owner who
+  // fat-fingers a model name on a running capsule must not take it down — a dead
+  // agent and a revoked one look identical on a dashboard, and only one of them
+  // is this system's headline feature.
+  const rawModel = text[RECORD_KEYS.model] ?? "";
+  if (rawModel !== "") {
+    for (const problem of modelRefProblems(rawModel)) {
+      problems.push(`${RECORD_KEYS.model} — ${problem}`);
+    }
+  }
+
   if (problems.length > 0) throw new ConfigError(problems);
 
   const heartbeatRaw = text[RECORD_KEYS.heartbeat] ?? "";
@@ -180,7 +203,10 @@ export async function loadCapsuleConfig(
     node,
     resolver: resolver as Address,
     agent,
-    model: text[RECORD_KEYS.model]!,
+    model: rawModel,
+    // Non-null because modelRefProblems above already rejected everything the
+    // parser returns null for, and a problem there threw.
+    modelRef: parseModelRef(rawModel)!,
     endpoint: text[RECORD_KEYS.endpointCapsule]!,
     promptRef: text[RECORD_KEYS.prompt]!,
     heartbeat: { raw: heartbeatRaw, sequence: parseHeartbeatSequence(heartbeatRaw) },
