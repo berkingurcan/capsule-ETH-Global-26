@@ -11,7 +11,8 @@ Everything below was verified against the live Sepolia beta, not from docs.
 | Parent name | `capsulefleet.eth` |
 | Our subregistry (`PermissionedRegistry`) | `0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e` |
 | Our resolver (`PermissionedResolver` proxy) | `0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3` |
-| **`CapsuleMinter`** (ours) | _redeploy pending — see "One minter, many parents" below_ |
+| **`CapsuleMinter`** (ours) | `0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51` — block `11669320`, verified |
+| …its ERC-7930 registry id | `0x0001000003aa36a714e114caf799f11ed61bd44fc7d498d96db62bdf51` |
 | …superseded, single-parent | ~~`0x193Bb7dB059a6f93e796d97da278465d20224819`~~ |
 | …superseded, dotted keys | ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ |
 | Parent namehash | `0x036a91f25e11db713abf00b569adb0a03c248d7b9f291430dac6807860d4a6b3` |
@@ -74,6 +75,22 @@ deployed that registry — necessarily, or they could not have granted the minte
 `ROLE_REGISTRAR` in the first place. No owner table, no allowlist, no signature scheme.
 `open` then decides whether strangers may mint under a connected name: `true` for a demo
 parent people are invited to try, `false` (the default) for a name somebody owns.
+
+### The live deployment
+
+`0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51`, deployed in block `11669320` and verified on
+Etherscan. `capsulefleet.eth` is connected to it and **open**, so anyone may mint there.
+
+**The four demo capsules were deliberately NOT re-minted.** `trader`, `dev`, `marketing` and
+`analyst` are still registered through the superseded minter, still resolve, and the analyst
+runner still holds its heartbeat role — nothing about them broke. But `/fleet` enumerates
+capsules from `CapsuleMinted` logs, and those logs belong to the old minter, so the dashboard
+reads empty until something is minted through the new one. Re-minting them is
+`MintCapsules.s.sol`, which unregisters each name first; that was a deliberate call not to
+disturb four live names, not an oversight.
+
+Note also that the ENSIP-25 registration key is derived from the minter address, so the
+records on those four names name a registry that is no longer the one issuing capsules.
 
 ### Deploying
 
