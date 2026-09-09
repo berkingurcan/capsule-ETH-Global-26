@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import Capsule from "@/components/Capsule";
-import { ANSWERS, type Answer } from "@/lib/mock";
+import { ANSWERS, type Answer } from "@/lib/analyst-demo";
 
 /* The fleet analyst: a Subgraph MCP server over the Sepolia subgraph,
    asked in plain language. The point of the track is the reasoning, not
@@ -59,7 +59,7 @@ export default function AnalystPage() {
           {
             who: "analyst",
             text:
-              "This demo only carries two worked answers. Try one of the questions on the left — those run against the real subgraph shape.",
+              "This demo only carries two worked answers, and they are scripted — the subgraph is not deployed yet. Try one of the questions on the left.",
           },
         ]);
       }
@@ -78,6 +78,14 @@ export default function AnalystPage() {
             A Subgraph MCP server sits over the fleet subgraph. It answers in sentences and shows the query it ran,
             so you can check it.
           </p>
+          <div className="notice" style={{ marginTop: 16, borderColor: "var(--sun)", background: "#fff" }}>
+            <span className="tag ink">Scripted</span>
+            <p style={{ margin: 0 }}>
+              This page is the only one left that is not reading live data — the subgraph it describes is not deployed
+              yet, so the two answers below are worked examples drawn from a real Phase 5 run. Everything on{" "}
+              <a href="/fleet">the fleet dashboard</a> is read from ETH Sepolia at request time.
+            </p>
+          </div>
         </div>
 
         <div className="grid g-side" style={{ gap: 26 }}>

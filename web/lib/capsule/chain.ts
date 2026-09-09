@@ -61,6 +61,19 @@ export const minterAbi = parseAbi([
   "event CapsuleMinted(bytes32 indexed node, address indexed owner, address indexed agent, uint256 tokenId, string label, uint64 expiry)",
 ]);
 
+/**
+ * `batch` on both levels, because the fleet read is dozens of small calls.
+ *
+ * `multicall: true` folds concurrent `readContract` calls into one Multicall3
+ * call; `http({ batch: true })` folds whatever is left — `eth_getBlockByNumber`
+ * for event timestamps, mostly — into one HTTP request. Without them a
+ * four-capsule fleet is around sixty round trips to a public RPC, which is both
+ * slow and a good way to get rate limited mid-render.
+ */
 export function createServerClient(rpcUrl: string): PublicClient {
-  return createPublicClient({ chain: CHAIN, transport: http(rpcUrl) });
+  return createPublicClient({
+    chain: CHAIN,
+    transport: http(rpcUrl, { batch: true }),
+    batch: { multicall: true },
+  });
 }

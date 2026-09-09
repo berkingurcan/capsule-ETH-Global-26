@@ -35,11 +35,11 @@ export default function Nav() {
           </div>
 
           <span
-            className="tag sun"
+            className="tag"
             style={{ marginLeft: "auto" }}
-            title="The wallet is real. The fleet below is still mock data."
+            title="Names, records, roles and heartbeats are read from ETH Sepolia at request time."
           >
-            Mock fleet
+            Live · Sepolia
           </span>
 
           <ConnectButton />

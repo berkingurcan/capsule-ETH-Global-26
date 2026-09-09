@@ -91,6 +91,16 @@ export type ServerEnv = {
   runnerImage: string;
 
   minterAddress: Address;
+  /**
+   * The block the minter was deployed in.
+   *
+   * `readFleet` enumerates capsules from `CapsuleMinted` logs, and a public RPC
+   * will refuse — or silently truncate — a scan from block 0. It is configured
+   * rather than hardcoded for the same reason the minter address is: a redeploy
+   * moves both, and a stale constant here returns an empty fleet rather than an
+   * error. Read it off `contracts/broadcast/DeployCapsuleMinter.s.sol`.
+   */
+  minterBlock: bigint;
   /** e.g. "capsulefleet.eth" — every capsule is a label under this. */
   parentName: string;
   /**
@@ -113,11 +123,29 @@ export function loadServerEnv(): ServerEnv {
     throw new InvalidEnvError("CAPSULE_MINTER_ADDRESS", "is not an EVM address");
   }
 
+  const rawBlock = requireEnv("CAPSULE_MINTER_BLOCK");
+  if (!/^\d+$/.test(rawBlock)) {
+    throw new InvalidEnvError("CAPSULE_MINTER_BLOCK", "must be a decimal block number");
+  }
+  const minterBlock = BigInt(rawBlock);
+
   const parentName = requireEnv("CAPSULE_PARENT_NAME");
   if (!parentName.endsWith(".eth") || parentName.split(".").length !== 2) {
     throw new InvalidEnvError(
       "CAPSULE_PARENT_NAME",
       "must be a second-level name such as capsulefleet.eth",
+    );
+  }
+
+  // The browser gets its own copy of this one value (lib/capsule/public-env.ts),
+  // because env.ts refuses to load client-side. Two copies drift, so they are
+  // asserted against each other here — the same guard the record keys get. A
+  // mismatch means the launch form is offering subnames under the wrong parent.
+  const publicParentName = optionalEnv("NEXT_PUBLIC_CAPSULE_PARENT_NAME");
+  if (publicParentName !== undefined && publicParentName !== parentName) {
+    throw new InvalidEnvError(
+      "NEXT_PUBLIC_CAPSULE_PARENT_NAME",
+      `is "${publicParentName}" but CAPSULE_PARENT_NAME is "${parentName}" — they must match`,
     );
   }
 
@@ -132,6 +160,7 @@ export function loadServerEnv(): ServerEnv {
     runnerImage: optionalEnv("RUNNER_IMAGE") ?? `registry.fly.io/${flyAppName}:latest`,
 
     minterAddress,
+    minterBlock,
     parentName,
     publicUrl: requireUrl("CAPSULE_PUBLIC_URL").replace(/\/+$/, ""),
   };

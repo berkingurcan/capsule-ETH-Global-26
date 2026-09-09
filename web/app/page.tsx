@@ -1,6 +1,13 @@
 import Link from "next/link";
 import Capsule from "@/components/Capsule";
 import ActivityFeed from "@/components/ActivityFeed";
+import { loadFleet } from "@/lib/capsule/fleet-server";
+
+/* The feed at the bottom is real, so this page reads the chain. If that read
+   fails the section is dropped rather than faked — a landing page is the worst
+   place to show invented activity, because it is the one page a judge lands on
+   without knowing what is real. */
+export const dynamic = "force-dynamic";
 
 const TOUR = [
   {
@@ -16,7 +23,7 @@ const TOUR = [
     n: "02",
     cap: "#8CF0B4",
     title: "The fleet",
-    body: "Every capsule you own, its heartbeat, its balance, its live log — and the button that pulls its permission.",
+    body: "Every capsule you own, its records, its heartbeat and the writes behind it — and the button that pulls its permission.",
     cta: "Open the dashboard",
   },
   {
@@ -29,7 +36,8 @@ const TOUR = [
   },
 ];
 
-export default function Home() {
+export default async function Home() {
+  const fleet = await loadFleet();
   return (
     <>
       {/* ---------- hero ---------- */}
@@ -229,6 +237,7 @@ export default function Home() {
       </section>
 
       {/* ---------- live feed ---------- */}
+      {fleet.ok && fleet.fleet.events.length > 0 && (
       <section className="band b-shell">
         <div className="wrap">
           <div className="sec-head">
@@ -239,9 +248,10 @@ export default function Home() {
               the permission and the write it authorises are the same story, a gap in it means something.
             </p>
           </div>
-          <ActivityFeed limit={5} />
+          <ActivityFeed events={fleet.fleet.events} now={fleet.fleet.readAt} limit={5} />
         </div>
       </section>
+      )}
     </>
   );
 }
