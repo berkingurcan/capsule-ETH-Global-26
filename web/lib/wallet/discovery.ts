@@ -51,35 +51,66 @@ function emit() {
 function onAnnounce(event: Event) {
   const detail = (event as AnnounceEvent).detail;
   if (!detail?.info?.rdns || !detail.provider) return;
-  // Wallets re-announce on every request broadcast. Key on rdns, not uuid:
-  // uuid is per-page-load, so keying on it would grow the list on each poll.
+
+  // If this exact rdns is already registered, skip
   if (wallets.some((w) => w.info.rdns === detail.info.rdns)) return;
+
+  // If we already have a generic/injected entry that wraps this same provider, replace it with the rich metadata
+  const existingProviderIndex = wallets.findIndex(
+    (w) =>
+      w.provider === detail.provider ||
+      (w.info.rdns === INJECTED_RDNS &&
+        ((w.provider as { isMetaMask?: boolean })?.isMetaMask && detail.info.rdns === "io.metamask")),
+  );
+
+  if (existingProviderIndex !== -1) {
+    wallets = wallets.map((w, idx) => (idx === existingProviderIndex ? detail : w));
+    emit();
+    return;
+  }
+
   wallets = [...wallets, detail];
   emit();
 }
 
 /**
- * Adds `window.ethereum` only if nothing announced itself.
- *
- * Running this unconditionally would double-list every modern wallet, since
- * they both announce AND inject.
+ * Registers `window.ethereum` as fallback if available, deduping against
+ * any already announced provider.
  */
 function addInjectedFallback() {
-  if (wallets.length > 0) return;
-  const injected = (window as { ethereum?: Eip1193Provider }).ethereum;
+  if (typeof window === "undefined") return;
+  const injected = (window as { ethereum?: Eip1193Provider & { isMetaMask?: boolean; isRabby?: boolean } }).ethereum;
   if (injected === undefined) return;
-  wallets = [
-    {
-      info: { uuid: INJECTED_RDNS, name: "Browser wallet", icon: "", rdns: INJECTED_RDNS },
-      provider: injected,
-    },
-  ];
+
+  if (
+    wallets.some(
+      (w) =>
+        w.provider === injected ||
+        (injected.isMetaMask && (w.info.rdns === "io.metamask" || w.info.name.toLowerCase().includes("metamask"))),
+    )
+  ) {
+    return;
+  }
+
+  const isMetaMask = Boolean(injected.isMetaMask);
+  const isRabby = Boolean(injected.isRabby);
+  const info: WalletInfo = {
+    uuid: isMetaMask ? "io.metamask" : INJECTED_RDNS,
+    name: isMetaMask ? "MetaMask" : isRabby ? "Rabby" : "Browser wallet",
+    icon: "",
+    rdns: isMetaMask ? "io.metamask" : isRabby ? "io.rabby" : INJECTED_RDNS,
+  };
+
+  wallets = [...wallets, { info, provider: injected }];
   emit();
 }
 
 function start() {
   if (started || typeof window === "undefined") return;
   started = true;
+  // If window.ethereum is already present, immediately register it
+  addInjectedFallback();
+
   window.addEventListener("eip6963:announceProvider", onAnnounce);
   window.dispatchEvent(new Event("eip6963:requestProvider"));
   // Extensions that inject late miss the first broadcast. Two cheap re-asks
