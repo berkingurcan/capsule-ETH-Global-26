@@ -10,8 +10,9 @@
  *   npm run preflight
  */
 import { neon } from "@neondatabase/serverless";
+import { formatEther } from "viem";
 import { createServerClient, minterAbi } from "../lib/capsule/chain";
-import { loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
+import { loadProvisionerEnv, loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
 import { getApp } from "../lib/capsule/fly";
 
 type Check = { name: string; ok: boolean; detail: string };
@@ -82,6 +83,32 @@ async function main() {
     record("fly", true, `app ${app.name} (${app.status}) visible to this token`);
   } catch (error) {
     record("fly", false, reason(error));
+  }
+
+  // --- The funder ---------------------------------------------------------
+  //
+  // Reported, not required. `CAPSULE_FUNDER_KEY` is loaded by the provision
+  // route alone, so a deployment that only mints is correctly configured
+  // without it — and one that means to provision wants to know before a user
+  // does that its wallet is empty.
+  try {
+    const provisioner = loadProvisionerEnv();
+    const balance = await client.getBalance({ address: provisioner.funderAddress });
+    const capsules = balance / provisioner.agentFundingWei;
+    record(
+      "funder",
+      capsules > 0n,
+      capsules > 0n
+        ? `${provisioner.funderAddress} · ${formatEther(balance)} ETH · ${capsules} capsule(s) at ${formatEther(provisioner.agentFundingWei)} each`
+        : `${provisioner.funderAddress} holds ${formatEther(balance)} ETH — not enough to fund one agent`,
+    );
+  } catch (error) {
+    if (error instanceof MissingEnvError && error.varName === "CAPSULE_FUNDER_KEY") {
+      console.log("");
+      console.log("  note      CAPSULE_FUNDER_KEY is unset — minting works, provisioning answers 503");
+    } else {
+      record("funder", false, reason(error));
+    }
   }
 
   // --- Informational ------------------------------------------------------

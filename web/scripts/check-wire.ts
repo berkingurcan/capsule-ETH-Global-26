@@ -16,6 +16,8 @@ import { dirname, resolve } from "node:path";
 import {
   PREPARE_PREFIX,
   prepareMessage,
+  PROVISION_PREFIX,
+  provisionMessage,
   PROMPT_FETCH_PREFIX,
   RUNTIME_FETCH_PREFIX,
   runtimeFetchMessage,
@@ -185,6 +187,37 @@ expect(
   "prepare message binds the body digest",
   prepareSample.includes("0xdeadbeef"),
   "the signature would not cover the request body",
+);
+
+////////////////////////////////////////////////////////////////////////////
+// The provisioner's separator
+////////////////////////////////////////////////////////////////////////////
+
+// `capsule-provision` has no runner counterpart either — it is also signed in a
+// browser, by the name's owner. It must be distinct from all three of the
+// others, and the reason is sharper than for `capsule-prepare`: this is the only
+// signature in the system that makes us SPEND. A signature captured from the
+// launch form, or from an agent's own prompt fetch, must not be replayable into
+// a request that funds a wallet and starts a machine.
+expect(
+  "provision prefix is distinct from every other separator",
+  ![...agentPrefixes, PREPARE_PREFIX].includes(PROVISION_PREFIX),
+  `provision "${PROVISION_PREFIX}" vs [${[...agentPrefixes, PREPARE_PREFIX].join(", ")}]`,
+);
+
+const provisionSample = provisionMessage("Analyst.CapsuleFleet.eth", 1757260800);
+expect(
+  "provision sample",
+  provisionSample === "capsule-provision\nanalyst.capsulefleet.eth\n1757260800",
+  JSON.stringify(provisionSample),
+);
+
+// The name is the whole payload. If it ever stopped being in the signed string,
+// one owner's signature would provision any of their names — or any name at all.
+expect(
+  "provision message binds the capsule name",
+  provisionSample.includes("analyst.capsulefleet.eth"),
+  "the signature would not name which capsule to start",
 );
 
 for (const c of checks) {

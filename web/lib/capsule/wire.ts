@@ -118,3 +118,33 @@ export function isTimestampFresh(timestamp: number, now = Math.floor(Date.now() 
 export function isSameAddress(a: Address, b: Address): boolean {
   return isAddressEqual(a, b);
 }
+
+/**
+ * The launchpad → provisioner request, signed by the name's owner.
+ *
+ * A fourth separator. The prepare signature is from an address that hopes to
+ * own a name; this one is from an address the chain says *does* own it, and the
+ * route checks that against `registry.findOwner` before it spends anything.
+ *
+ * ## Why there is no digest here
+ *
+ * `prepareMessage` carries one because its body is content — a prompt, a token,
+ * a key — and a signature that did not cover it would authorise "this address
+ * wanted to prepare something". A provision request has exactly one field, the
+ * label, and the capsule name built from it is *in this message*. There is
+ * nothing left for a digest to cover.
+ *
+ * The name is the full capsule name, built by the caller from the parent it
+ * believes it is launching under and rebuilt by the route from its own
+ * `CAPSULE_PARENT_NAME`. A browser holding a stale parent therefore gets a
+ * signature failure rather than a machine booted for the wrong name.
+ *
+ * Freshness uses `isPrepareTimestampFresh`: both of the human-signed routes get
+ * the longer window, because a person reads a wallet prompt and may pick up
+ * their phone to approve it.
+ */
+export const PROVISION_PREFIX = "capsule-provision";
+
+export function provisionMessage(capsuleName: string, timestamp: number): string {
+  return [PROVISION_PREFIX, capsuleName.toLowerCase(), String(timestamp)].join("\n");
+}

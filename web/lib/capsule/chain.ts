@@ -48,6 +48,11 @@ export const minterAbi = parseAbi([
   "function isAgentAuthorized(string label, address agent) view returns (bool)",
   "function checkResolverRoles() view",
   "function PARENT_NODE() view returns (bytes32)",
+  // The subregistry every capsule label is registered in. Read rather than
+  // configured: it is an immutable set at construction, so a redeploy moves it,
+  // and a second environment variable holding a copy is a second thing to keep
+  // in step with the minter address.
+  "function REGISTRY() view returns (address)",
   "function DURATION() view returns (uint64)",
   "function SCHEMA_URI() view returns (string)",
   // ENSIP-25. Read these rather than rebuilding the key locally: the interoperable
@@ -59,6 +64,24 @@ export const minterAbi = parseAbi([
   // Carries no record values on purpose: the resolver emits its own event per
   // setText, so an indexer reads the config from there or from the records.
   "event CapsuleMinted(bytes32 indexed node, address indexed owner, address indexed agent, uint256 tokenId, string label, uint64 expiry)",
+]);
+
+/**
+ * The ENSv2 subregistry holding capsule labels, reached via `minter.REGISTRY()`.
+ *
+ * `findOwner` is the provisioner's authorisation primitive, and it is the
+ * *current* owner rather than the address in the `CapsuleMinted` log — a name
+ * that has been transferred belongs to whoever holds it now, and the log is a
+ * record of who held it once. Names it has never issued return the zero
+ * address, which is how "not minted" is spelled.
+ *
+ * Not `findTokenId`: that returns a non-zero id for a label nobody has ever
+ * registered, because the id is derived from the label rather than looked up.
+ * Using it as an existence check would report every free name as taken.
+ */
+export const registryAbi = parseAbi([
+  "function findOwner(string label) view returns (address owner)",
+  "function findTokenId(string label) view returns (uint256 tokenId)",
 ]);
 
 /**

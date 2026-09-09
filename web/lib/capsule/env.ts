@@ -15,7 +15,8 @@
  * would take the standalone preflight script down with it. A window check
  * costs one line and holds in every context we actually run in.
  */
-import { getAddress, type Address } from "viem";
+import { getAddress, isHex, parseEther, type Address, type Hex } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
 
 if (typeof window !== "undefined") {
   throw new Error("lib/capsule/env is server-only and was imported in a browser");
@@ -164,4 +165,94 @@ export function loadServerEnv(): ServerEnv {
     parentName,
     publicUrl: requireUrl("CAPSULE_PUBLIC_URL").replace(/\/+$/, ""),
   };
+}
+
+////////////////////////////////////////////////////////////////////////////
+// The provisioner
+////////////////////////////////////////////////////////////////////////////
+
+/**
+ * What `POST /api/capsule/provision` needs, and nothing else needs.
+ *
+ * Kept out of `ServerEnv` on purpose. `loadServerEnv()` runs on every page
+ * render and in every route, so a variable added there is a variable that must
+ * be set before the fleet dashboard will draw — and the funder key is required
+ * by exactly one endpoint. Folding it in would mean a deployment that only
+ * wants to mint could not render a page for want of a wallet it never spends.
+ *
+ * Everything here still fails loudly. The provisioner sends real ETH and starts
+ * a real machine; a defaulted funding amount or a silently-halved memory limit
+ * would be discovered as an agent that stops beating, or as an OOM that looks
+ * like a clean restart.
+ */
+export type ProvisionerEnv = {
+  /** Pays each agent's heartbeat. The only key this codebase signs with. */
+  funderKey: Hex;
+  funderAddress: Address;
+  /** Every agent is topped up to this balance, not sent this much. */
+  agentFundingWei: bigint;
+  /** Never below 1024 — see GATE-LOG.md. 842 MiB measured, and 512 OOMs quietly. */
+  machineMemoryMb: number;
+  tickSeconds: number;
+  heartbeatSeconds: number;
+};
+
+export function loadProvisionerEnv(): ProvisionerEnv {
+  const rawKey = requireEnv("CAPSULE_FUNDER_KEY");
+  const funderKey = (rawKey.startsWith("0x") ? rawKey : `0x${rawKey}`) as Hex;
+  if (!isHex(funderKey) || funderKey.length !== 66) {
+    throw new InvalidEnvError("CAPSULE_FUNDER_KEY", "is not a 32-byte hex private key");
+  }
+  const funderAddress = privateKeyToAccount(funderKey).address;
+
+  // Decimal ETH rather than wei, because this is a number a person sets by
+  // hand and 10000000000000000 is a number a person mistypes by hand.
+  const rawFunding = optionalEnv("CAPSULE_AGENT_FUNDING_ETH") ?? "0.01";
+  if (!/^\d+(\.\d+)?$/.test(rawFunding)) {
+    throw new InvalidEnvError("CAPSULE_AGENT_FUNDING_ETH", "must be a decimal amount of ETH");
+  }
+  const agentFundingWei = parseEther(rawFunding);
+  if (agentFundingWei === 0n) {
+    // An agent with no gas cannot write `agent-heartbeat`, and a heartbeat that
+    // fails for want of gas is the one failure this system must never let look
+    // like a revocation. Refuse the configuration that guarantees it.
+    throw new InvalidEnvError("CAPSULE_AGENT_FUNDING_ETH", "is zero — an agent with no gas cannot beat");
+  }
+
+  const rawMemory = optionalEnv("FLY_MACHINE_MEMORY_MB") ?? "2048";
+  if (!/^\d+$/.test(rawMemory)) {
+    throw new InvalidEnvError("FLY_MACHINE_MEMORY_MB", "must be a whole number of megabytes");
+  }
+  const machineMemoryMb = Number(rawMemory);
+  if (machineMemoryMb < 1024) {
+    throw new InvalidEnvError(
+      "FLY_MACHINE_MEMORY_MB",
+      `is ${machineMemoryMb} — the gateway, supervisor and Codex measured 842 MiB together, ` +
+        "so anything under 1024 OOMs on the first conversation and the restart looks like a clean boot",
+    );
+  }
+
+  const rawTick = optionalEnv("CAPSULE_TICK_SECONDS") ?? "30";
+  const tickSeconds = Number(rawTick);
+  if (!Number.isSafeInteger(tickSeconds) || tickSeconds < 5) {
+    throw new InvalidEnvError("CAPSULE_TICK_SECONDS", "must be a whole number of seconds, at least 5");
+  }
+
+  const rawBeat = optionalEnv("CAPSULE_HEARTBEAT_SECONDS") ?? "28800";
+  const heartbeatSeconds = Number(rawBeat);
+  if (!Number.isSafeInteger(heartbeatSeconds) || heartbeatSeconds < 5) {
+    throw new InvalidEnvError("CAPSULE_HEARTBEAT_SECONDS", "must be a whole number of seconds, at least 5");
+  }
+  // The runner refuses this combination at boot (runner/src/env.ts). Refusing it
+  // here too means the operator finds out at deploy time rather than from a
+  // container that started and then died with a config error.
+  if (heartbeatSeconds < tickSeconds) {
+    throw new InvalidEnvError(
+      "CAPSULE_HEARTBEAT_SECONDS",
+      `is ${heartbeatSeconds}s but CAPSULE_TICK_SECONDS is ${tickSeconds}s — ` +
+        "the loop cannot beat faster than it ticks",
+    );
+  }
+
+  return { funderKey, funderAddress, agentFundingWei, machineMemoryMb, tickSeconds, heartbeatSeconds };
 }

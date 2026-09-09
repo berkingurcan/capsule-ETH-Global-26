@@ -18,7 +18,8 @@
     "check:route": "node --env-file=../runner/.env --env-file=.env.local --import tsx scripts/route-check.ts",
     "check:fleet": "node --env-file=.env.local --import tsx scripts/check-fleet.ts",
     "check:prepare": "node --env-file=.env.local --import tsx scripts/check-prepare.ts",
-    "check:mint": "node --env-file=.env.local --import tsx scripts/check-mint.ts"
+    "check:mint": "node --env-file=.env.local --import tsx scripts/check-mint.ts",
+    "check:provision": "node --env-file=.env.local --import tsx scripts/check-provision.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import type { Address } from "viem";
+import { formatEther, type Address } from "viem";
 import Capsule from "@/components/Capsule";
 import { CHAIN } from "@/lib/capsule/chain";
 import { RECORD_KEYS } from "@/lib/capsule/records";
@@ -16,6 +16,11 @@ import {
   PrepareError,
   type PrepareResult,
 } from "@/lib/capsule/prepare-client";
+import {
+  provisionCapsuleRequest,
+  ProvisionError,
+  type ProvisionResult,
+} from "@/lib/capsule/provision-client";
 import { shortHex, txUrl } from "@/lib/format";
 import {
   PROVIDERS,
@@ -35,14 +40,17 @@ import {
    hackathon deployment mints for free, and a fee — if it ever exists —
    is one msg.value check on CapsuleMinter.mint().
 
-   Steps 01–04 are real. Each capsule costs the owner one signature (the
-   prepare request) and one transaction (the mint), in that order,
-   because `mint()` takes the agent address and the prompt pointer as
-   arguments and neither exists until the server has generated and
-   sealed them.
+   All five steps are real. Each capsule costs the owner three
+   signatures — prepare, mint, provision — and one transaction, in that
+   order, because `mint()` takes the agent address and the prompt
+   pointer as arguments and neither exists until the server has
+   generated and sealed them, and provisioning needs a name that exists
+   before it can prove who owns it.
 
-   Step 05 is not wired: nothing here starts a machine yet, and the page
-   says so rather than animating a boot that is not happening.
+   The one thing this form still cannot do is add a second provider key
+   after the fact, which is called out on the configure step: switching
+   `agent-model` to a provider with no stored key stops the agent, and a
+   stopped agent looks like a recall.
    ------------------------------------------------------------------ */
 
 const STEPS = ["Wallet", "Roles", "Configure", "Mint", "Provision"];
@@ -1168,16 +1176,86 @@ function StepMint({
 /* ---------------- 05 · provision ---------------- */
 
 /**
- * Where the demo stops today.
+ * The last step, and the first one that starts something.
  *
- * The names exist, their records are written and their agents hold the
- * heartbeat role — all of it verifiable on Sepolia right now. What does not
- * exist is a machine: nothing has called Fly, nothing has funded the agent
- * EOA, and no runner has booted. This screen used to animate exactly that
- * sequence, which made a mint look like a launch. It says what happened
- * instead.
+ * A minted capsule is a name with records and an agent address whose private
+ * half we hold — and nothing running. This screen closes that gap: one signature
+ * per capsule, sent to `POST /api/capsule/provision`, which checks on chain that
+ * the signer is the name's current owner, tops the agent's wallet up so it can
+ * pay for its own heartbeat, and starts the runner on Fly.
+ *
+ * The signature is what makes it safe to expose. `addr` proves a capsule exists;
+ * it says nothing about who is asking, and provisioning spends real ETH — so
+ * without an owner check anyone could mint labels all day and start machines on
+ * someone else's wallet.
+ *
+ * Retrying is safe and the copy says so, because the route makes it true: the
+ * machine is found by metadata before anything is spent, and the agent is topped
+ * up *to* a balance rather than sent an amount. A capsule that is already
+ * running costs nothing to ask about twice.
  */
+type BootPhase = "idle" | "signing" | "starting" | "running" | "failed";
+type Boot = { phase: BootPhase; result: ProvisionResult | null; error: string | null };
+
+const IDLE_BOOT: Boot = { phase: "idle", result: null, error: null };
+
 function StepProvision({ minted }: { minted: Minted[] }) {
+  const { address, chainOk, getWalletClient } = useWallet();
+  const [boots, setBoots] = useState<Record<string, Boot>>({});
+  const [busy, setBusy] = useState(false);
+
+  const bootOf = (slug: string): Boot => boots[slug] ?? IDLE_BOOT;
+  const set = (slug: string, boot: Boot) => setBoots((all) => ({ ...all, [slug]: boot }));
+
+  const start = useCallback(
+    async (m: Minted) => {
+      const walletClient = getWalletClient();
+      if (walletClient === null || address === null) return;
+
+      set(m.draft.slug, { phase: "signing", result: null, error: null });
+      try {
+        const result = await provisionCapsuleRequest(
+          { label: m.draft.slug, capsuleName: `${m.draft.slug}.${PARENT_NAME}` },
+          async (args) => {
+            const signature = await walletClient.signMessage({ account: address, message: args.message });
+            // Signed. Everything after this is the server's work, and it can
+            // take a while — a Fly machine create on a cold app is not instant.
+            set(m.draft.slug, { phase: "starting", result: null, error: null });
+            return signature;
+          },
+        );
+        set(m.draft.slug, { phase: "running", result, error: null });
+      } catch (error) {
+        const message =
+          error instanceof ProvisionError
+            ? error.failure.error
+            : error instanceof Error && /user (rejected|denied)/i.test(error.message)
+              ? "Signature rejected in the wallet."
+              : error instanceof Error
+                ? error.message
+                : "the provision failed";
+        set(m.draft.slug, { phase: "failed", result: null, error: message });
+      }
+    },
+    [address, getWalletClient],
+  );
+
+  /** One at a time: each capsule is its own wallet prompt, and stacking them
+      produces a queue of popups nobody reads. */
+  const startAll = useCallback(async () => {
+    setBusy(true);
+    for (const m of minted) {
+      if (bootOf(m.draft.slug).phase === "running") continue;
+      await start(m);
+    }
+    setBusy(false);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [minted, start, boots]);
+
+  const pending = minted.filter((m) => bootOf(m.draft.slug).phase !== "running");
+  const running = minted.length - pending.length;
+  const canStart = chainOk && address !== null && !busy;
+
   return (
     <div className="panel pad-lg">
       <div className="stepline">
@@ -1188,62 +1266,157 @@ function StepProvision({ minted }: { minted: Minted[] }) {
       <p className="ssub">
         Every record below is on {CHAIN.name} and readable by anything that speaks ENS. The agent holds{" "}
         <span className="mono">{RECORD_KEYS.heartbeat}</span> and nothing else, and you hold every other role —
-        including the one that takes that away.
+        including the one that takes that away. Starting a capsule funds its agent so it can pay for its own
+        heartbeat, and boots its runner.
       </p>
 
       <div className="grid g2">
-        {minted.map(({ draft, prepared, receipt }) => (
-          <div key={draft.slug} className="tile">
-            <div className="row" style={{ gap: 12, marginBottom: 14 }}>
-              <Capsule size={38} cap={draft.cap} />
-              <div style={{ minWidth: 0 }}>
-                <div className="ensname" style={{ fontSize: 14.5 }}>
-                  {draft.slug}
-                  <span className="p">.{PARENT_NAME_DISPLAY}</span>
+        {minted.map((m) => {
+          const { draft, prepared, receipt } = m;
+          const boot = bootOf(draft.slug);
+          return (
+            <div key={draft.slug} className="tile">
+              <div className="row" style={{ gap: 12, marginBottom: 14 }}>
+                <Capsule size={38} cap={draft.cap} />
+                <div style={{ minWidth: 0 }}>
+                  <div className="ensname" style={{ fontSize: 14.5 }}>
+                    {draft.slug}
+                    <span className="p">.{PARENT_NAME_DISPLAY}</span>
+                  </div>
+                  <div className="hint">{prepared.config.model}</div>
                 </div>
-                <div className="hint">{prepared.config.model}</div>
+                <span className="push">
+                  {boot.phase === "running" ? (
+                    <span className="pill run">
+                      <span className="led" />
+                      {boot.result?.created === false ? "already running" : "running"}
+                    </span>
+                  ) : boot.phase === "failed" ? (
+                    <span className="pill">not started</span>
+                  ) : boot.phase === "idle" ? (
+                    <span className="pill">never booted</span>
+                  ) : (
+                    <span className="pill wait">
+                      <span className="led pulse" />
+                      {boot.phase === "signing" ? "sign it" : "starting"}
+                    </span>
+                  )}
+                </span>
               </div>
-              <span className="push">
-                <span className="pill">never booted</span>
-              </span>
+              <pre className="term" style={{ fontSize: 11.5, lineHeight: 1.8 }}>
+                <span className="d">token </span>
+                <span className="w">{receipt.tokenId.toString()}</span>
+                {"\n"}
+                <span className="d">node </span>
+                <span className="w">{shortHex(receipt.node)}</span>
+                {"\n"}
+                <span className="d">addr </span>
+                <span className="w">{prepared.agent}</span>
+                {"\n"}
+                <span className="d">{RECORD_KEYS.prompt} </span>
+                <span className="y">{prepared.promptRef}</span>
+                {"\n"}
+                <span className="d">{RECORD_KEYS.endpointWeb} </span>
+                <span className="w">{prepared.config.telegramUrl || "—"}</span>
+                {"\n"}
+                <span className="d">block </span>
+                <span className="g">{receipt.blockNumber.toString()}</span>
+                {boot.result !== null && (
+                  <>
+                    {"\n"}
+                    <span className="d">machine </span>
+                    <span className="g">
+                      {boot.result.machine.id} · {boot.result.machine.state} · {boot.result.machine.region}
+                    </span>
+                    {"\n"}
+                    <span className="d">gas </span>
+                    <span className="w">
+                      {boot.result.funding === null
+                        ? "untouched — it was already running"
+                        : boot.result.funding.sent === "0"
+                          ? `already held ${formatEther(BigInt(boot.result.funding.balanceBefore))} ETH`
+                          : `sent ${formatEther(BigInt(boot.result.funding.sent))} ETH`}
+                    </span>
+                  </>
+                )}
+              </pre>
+
+              <div className="row" style={{ gap: 10, marginTop: 12 }}>
+                <a className="mono hint" style={{ fontSize: 11.5 }} href={txUrl(receipt.hash)} target="_blank" rel="noreferrer">
+                  {shortHex(receipt.hash)} ↗
+                </a>
+                <span className="push">
+                  {boot.phase !== "running" && (
+                    <button
+                      className="btn btn-sm btn-primary"
+                      disabled={!canStart || boot.phase === "signing" || boot.phase === "starting"}
+                      onClick={() => void start(m)}
+                    >
+                      {boot.phase === "failed" ? "Try again" : boot.phase === "idle" ? "Start it" : "Working…"}
+                    </button>
+                  )}
+                </span>
+              </div>
+
+              {boot.error !== null && (
+                <p className="hint" style={{ marginTop: 10, color: "var(--danger, #B4232A)" }}>
+                  {boot.error}
+                </p>
+              )}
+              {boot.result?.warnings.map((warning) => (
+                <p key={warning} className="hint" style={{ marginTop: 10 }}>
+                  ⚠ {warning}
+                </p>
+              ))}
             </div>
-            <pre className="term" style={{ fontSize: 11.5, lineHeight: 1.8 }}>
-              <span className="d">token </span>
-              <span className="w">{receipt.tokenId.toString()}</span>
-              {"\n"}
-              <span className="d">node </span>
-              <span className="w">{shortHex(receipt.node)}</span>
-              {"\n"}
-              <span className="d">addr </span>
-              <span className="w">{prepared.agent}</span>
-              {"\n"}
-              <span className="d">{RECORD_KEYS.prompt} </span>
-              <span className="y">{prepared.promptRef}</span>
-              {"\n"}
-              <span className="d">{RECORD_KEYS.endpointWeb} </span>
-              <span className="w">{prepared.config.telegramUrl || "—"}</span>
-              {"\n"}
-              <span className="d">block </span>
-              <span className="g">{receipt.blockNumber.toString()}</span>
-            </pre>
-            <a className="mono hint" style={{ fontSize: 11.5 }} href={txUrl(receipt.hash)} target="_blank" rel="noreferrer">
-              {shortHex(receipt.hash)} ↗
-            </a>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
-      <div className="notice" style={{ marginTop: 22, borderColor: "var(--line)" }}>
-        <span className="tag">Not done yet</span>
-        <p style={{ margin: 0 }}>
-          No machine is running. Provisioning — funding each agent&rsquo;s wallet for its heartbeat and starting its
-          runner on Fly — is a separate step and the launchpad does not do it yet, so these capsules will show as{" "}
-          <span className="mono">never-booted</span> on the fleet until a runner is started for them by hand.
-        </p>
-      </div>
+      {!chainOk && (
+        <div className="notice" style={{ marginTop: 22, borderColor: "var(--line)" }}>
+          <span className="tag">Wrong network</span>
+          <p style={{ margin: 0 }}>
+            Provisioning is authorised by a signature from the wallet that owns the name, checked against{" "}
+            {CHAIN.name}. Switch back to it to start these.
+          </p>
+        </div>
+      )}
+
+      {pending.length > 0 ? (
+        <div className="notice" style={{ marginTop: 22, borderColor: "var(--line)" }}>
+          <span className="tag">One signature each</span>
+          <p style={{ margin: 0 }}>
+            Starting a capsule proves you own it — the server checks the signature against the name&rsquo;s owner on
+            chain before it spends anything. It is safe to retry: a capsule that is already running is found before
+            any ETH is sent, and the agent is topped up <em>to</em> a balance rather than paid again.
+          </p>
+        </div>
+      ) : (
+        <div className="notice" style={{ marginTop: 22, borderColor: "var(--line)" }}>
+          <span className="tag">Running</span>
+          <p style={{ margin: 0 }}>
+            {running === 1 ? "The capsule is" : `All ${running} capsules are`} booting. The first heartbeat lands on
+            chain once the runner has resolved its name, and the fleet will show it. To stop one, revoke{" "}
+            <span className="mono">{RECORD_KEYS.heartbeat}</span> on its name — that is a transaction you send, and
+            it does not go through this server.
+          </p>
+        </div>
+      )}
 
       <div className="row" style={{ marginTop: 24, gap: 10 }}>
-        <Link href="/fleet" className="btn btn-primary">
+        {pending.length > 0 && (
+          <button className="btn btn-primary" disabled={!canStart} onClick={() => void startAll()}>
+            {busy
+              ? "Starting…"
+              : pending.length === minted.length
+                ? minted.length === 1
+                  ? "Start it"
+                  : `Start all ${minted.length}`
+                : `Start the remaining ${pending.length}`}
+          </button>
+        )}
+        <Link href="/fleet" className={"btn" + (pending.length > 0 ? " btn-ghost" : " btn-primary")}>
           Open the fleet →
         </Link>
         <Link href="/analyst" className="btn btn-sm btn-ghost push">
