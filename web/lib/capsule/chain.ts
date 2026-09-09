@@ -1,6 +1,10 @@
 /**
- * Chain access for the server side. Read-only: the launchpad never signs a
- * transaction, because the user does.
+ * Chain access: the addresses, the ABIs, and the two derivations every other
+ * module keys off.
+ *
+ * The clients built here are read-only — the app never holds a key. The one
+ * write path it has, the recall in `recall.ts`, is signed by the user's own
+ * wallet, and it uses `resolverAdminAbi` below.
  *
  * The minter ABI here is the subset the provisioner and the preflight need.
  * `checkResolverRoles` matters more than it looks: CapsuleMinter can only
@@ -9,7 +13,16 @@
  * mint reverts — after the user has already paid. Preflight checks it so the
  * failure is ours to see, not theirs to hit.
  */
-import { createPublicClient, http, parseAbi, type PublicClient } from "viem";
+import {
+  createPublicClient,
+  encodeAbiParameters,
+  http,
+  keccak256,
+  parseAbi,
+  toHex,
+  type Hex,
+  type PublicClient,
+} from "viem";
 import { sepolia } from "viem/chains";
 
 export const CHAIN = sepolia;
@@ -32,6 +45,73 @@ export const resolverAbi = parseAbi([
   "function addr(bytes32 node) view returns (address)",
   "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
 ]);
+
+/**
+ * The one function this app ever sends: the recall.
+ *
+ * Separate from `resolverAbi` because that one is a read ABI — it is encoded
+ * into `UniversalResolver.resolve()` calls, where a write function has no
+ * meaning. This one is pointed straight at the name's own resolver.
+ *
+ * `toName` is DNS wire format, NOT a namehash. The resolver namehashes it
+ * itself (`NameCoder.namehash(toName, 0)`), so passing 32 bytes of node here
+ * compiles, encodes, and revokes a role on a name nobody owns.
+ *
+ * The errors are here so a revert reaches the user as a sentence rather than a
+ * bare selector. `EACCannotRevokeRoles` is the one an ordinary wallet hits: it
+ * is what the resolver says when the caller does not hold
+ * `ROLE_SET_TEXT_ADMIN` on the name. `EACRolesChanged` is the receipt — the
+ * revoke is only real if the mined transaction emitted it.
+ */
+export const resolverAdminAbi = parseAbi([
+  "error DNSDecodingFailed(bytes dns)",
+  "error EACCannotRevokeRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "error EACInvalidAccount()",
+  "error EACInvalidRoleBitmap(uint256 roleBitmap)",
+  "error EACMinAssignees(uint256 resource, uint256 role)",
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+  "function authorizeTextRoles(bytes toName, string key, address account, bool grant) returns (bool)",
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+]);
+
+/**
+ * `ROLE_SET_TEXT` and its admin, from `PermissionedResolverLib`.
+ *
+ * Roles are nybble-packed — each occupies four bits — and the admin
+ * counterpart sits 128 bits higher. The agent holds the first on one key of
+ * one name; the owner holds the second on the whole name, which is the only
+ * reason the owner can take the first away.
+ */
+export const ROLE_SET_TEXT = 1n << 4n;
+export const ROLE_SET_TEXT_ADMIN = ROLE_SET_TEXT << 128n;
+
+/**
+ * `PermissionedResolverLib.resource(node, part)` — the EAC resource id.
+ *
+ * Two of them matter here and they are not interchangeable:
+ *
+ *   - `textResourceOf(node, key)` — one key on one name. This is what the
+ *     agent's write permission lives on, and what a recall clears.
+ *   - `nameResourceOf(node)` — the name itself, `resource(node, 0)`. This is
+ *     what the resolver checks the *caller* against before it will revoke, and
+ *     what `setText` reverts against regardless of which key was denied.
+ *
+ * Computed rather than called so a fleet-wide role query costs no round trips.
+ * `scripts/check-fleet.ts` asserts the first against `CapsuleMinter`, and
+ * `scripts/check-recall.ts` asserts the second by simulating a real revoke.
+ */
+export function textResourceOf(node: Hex, key: string): bigint {
+  return resourceOf(node, keccak256(toHex(key)));
+}
+
+export function nameResourceOf(node: Hex): bigint {
+  return resourceOf(node, `0x${"00".repeat(32)}` as Hex);
+}
+
+function resourceOf(node: Hex, part: Hex): bigint {
+  return BigInt(keccak256(encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [node, part])));
+}
 
 export const minterAbi = parseAbi([
   "error ZeroAddress()",

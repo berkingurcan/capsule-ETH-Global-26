@@ -27,23 +27,24 @@
  * Neither would have failed a build or a type check.
  */
 import {
-  encodeAbiParameters,
   decodeFunctionResult,
   encodeFunctionData,
-  keccak256,
   parseAbi,
-  toHex,
   zeroAddress,
   type Address,
   type Hex,
   type PublicClient,
 } from "viem";
-import { UNIVERSAL_RESOLVER_V2, minterAbi, resolverAbi, universalResolverAbi } from "./chain";
+import {
+  ROLE_SET_TEXT,
+  UNIVERSAL_RESOLVER_V2,
+  minterAbi,
+  resolverAbi,
+  textResourceOf,
+  universalResolverAbi,
+} from "./chain";
 import { RECORD_KEYS, REGISTRATION_VALUE, parseHeartbeatSequence, type RecordKeyName } from "./records";
 import { encodeName } from "./resolve";
-
-/** `ROLE_SET_TEXT` in `CapsuleMinter.sol` — the bit an agent holds on one key. */
-const ROLE_SET_TEXT = 1n << 4n;
 
 /** The resolver events we read. Signatures verified against the deployed source. */
 export const resolverEventsAbi = parseAbi([
@@ -52,19 +53,10 @@ export const resolverEventsAbi = parseAbi([
 ]);
 
 /**
- * `uint256(keccak256(abi.encode(node, keccak256(key))))`.
- *
- * Mirrors `CapsuleMinter.textResourceOf`. Computed rather than called so a
- * fleet-wide role query costs no round trips; asserted against the contract in
- * `scripts/check-fleet.ts`.
+ * Re-exported from `chain.ts`, where it sits next to the write path that needs
+ * the same derivation. `scripts/check-fleet.ts` imports it from here.
  */
-export function textResourceOf(node: Hex, key: string): bigint {
-  return BigInt(
-    keccak256(
-      encodeAbiParameters([{ type: "bytes32" }, { type: "bytes32" }], [node, keccak256(toHex(key))]),
-    ),
-  );
-}
+export { textResourceOf };
 
 /**
  * What a capsule is doing, as far as the chain can actually tell.

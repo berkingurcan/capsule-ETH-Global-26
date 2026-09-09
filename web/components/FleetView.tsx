@@ -2,11 +2,21 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import AgentCard from "./AgentCard";
 import ActivityFeed from "./ActivityFeed";
-import RecallDialog from "./RecallDialog";
 import { duration } from "@/lib/format";
 import type { Capsule, Fleet } from "@/lib/capsule/fleet";
+
+/* Loaded on click, not on load. The dialog is the only part of the dashboard
+   that signs anything, so it carries viem's write path — about 120kB that a
+   page whose job is reading the chain should not make every visitor download
+   to look at four cards. The scrim is drawn immediately so the click lands
+   somewhere while the chunk arrives. */
+const RecallDialog = dynamic(() => import("./RecallDialog"), {
+  ssr: false,
+  loading: () => <div className="scrim" aria-hidden />,
+});
 
 /* The client half of /fleet. It holds exactly one piece of state — which
    capsule the recall dialog is open on — and derives everything else from the

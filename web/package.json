@@ -19,6 +19,7 @@
     "check:fleet": "node --env-file=.env.local --import tsx scripts/check-fleet.ts",
     "check:prepare": "node --env-file=.env.local --import tsx scripts/check-prepare.ts",
     "check:mint": "node --env-file=.env.local --import tsx scripts/check-mint.ts",
+    "check:recall": "node --env-file=.env.local --import tsx scripts/check-recall.ts",
     "check:provision": "node --env-file=.env.local --import tsx scripts/check-provision.ts"
   },
   "dependencies": {

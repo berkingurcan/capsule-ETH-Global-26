@@ -2,16 +2,26 @@
 
 import { useState } from "react";
 import Link from "next/link";
+import dynamic from "next/dynamic";
 import CapsuleMark from "./Capsule";
 import StatusPill from "./StatusPill";
 import Heartbeat from "./Heartbeat";
 import Sparkline from "./Sparkline";
 import ChainLog from "./ChainLog";
-import RecallDialog from "./RecallDialog";
 import { RECORD_KEYS } from "@/lib/capsule/records";
 import { capColor, roleTitle } from "@/lib/capsule/roles";
 import { ago, addressUrl, duration, shortHex, txUrl } from "@/lib/format";
 import type { Capsule } from "@/lib/capsule/fleet";
+
+/* Loaded on click, not on load. The dialog is the only part of the dashboard
+   that signs anything, so it carries viem's write path — about 120kB that a
+   page whose job is reading the chain should not make every visitor download
+   to look at four cards. The scrim is drawn immediately so the click lands
+   somewhere while the chunk arrives. */
+const RecallDialog = dynamic(() => import("./RecallDialog"), {
+  ssr: false,
+  loading: () => <div className="scrim" aria-hidden />,
+});
 
 /* The record table is the whole argument of the project, so it shows the nine
    keys the mint actually writes plus the ENSIP-25 registration, and nothing
