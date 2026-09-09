@@ -75,6 +75,16 @@ function revertMessage(name: string, args: readonly unknown[] | undefined): stri
       return "the owner or the agent address was zero";
     case "MissingResolverRoles":
       return "the minter no longer holds write roles on the resolver, so it cannot write this name's records";
+    // The three below are the setup steps, reported as the step that is missing.
+    // The form checks `readiness()` before it offers a mint, so reaching any of
+    // them means the parent was reconfigured between that read and this signature —
+    // rare, and exactly the case where a bare selector would be baffling.
+    case "ParentNotConnected":
+      return "this name is no longer connected to Capsule — reconnect it at /connect before minting";
+    case "ParentNotOpen":
+      return "this name is closed to outside minters — only its own admins can mint here";
+    case "ParentLinkBroken":
+      return "this name's subregistry is not wired to it on chain, so Capsule cannot issue subnames under it";
     default:
       return `the mint reverted with ${name}`;
   }
@@ -107,16 +117,23 @@ function explain(error: unknown): MintError {
 }
 
 /**
- * The four arguments `mint()` takes, built from a prepare response.
+ * The five arguments `mint()` takes, built from a prepare response.
  *
  * Exported so `scripts/check-mint.ts` can simulate the real thing rather than
  * its own idea of it. The tuple order here is the ABI's, and the ABI's is the
  * struct's: viem encodes a tuple positionally, so an object with the right keys
  * is safe and a reordered one would silently write the Telegram URL into
  * `agent-context`. The check asserts that order against CapsuleMinter.sol.
+ *
+ * `registry` is the parent, and it comes from the caller rather than from the
+ * prepare response on purpose: the prepare route seals a prompt and returns an
+ * agent key, and it has no business deciding which name the capsule lands under.
+ * The parent is settled in the browser, printed in the signed message as part of
+ * the full capsule name, and re-derived from that name by both routes.
  */
-export function buildMintParams(prepared: PrepareResult) {
+export function buildMintParams(registry: Address, prepared: PrepareResult) {
   return [
+    registry,
     prepared.label,
     prepared.owner,
     prepared.agent,
@@ -164,6 +181,8 @@ export type MintArgs = {
   walletClient: WalletClient;
   publicClient: PublicClient;
   minter: Address;
+  /** The parent's subregistry — which name this capsule goes under. */
+  registry: Address;
   /** Straight from the prepare response. Never rebuilt from form state. */
   prepared: PrepareResult;
 };
@@ -179,11 +198,11 @@ export async function mintCapsule(
   args: MintArgs,
   onPhase?: (phase: "simulating" | "signing" | "mining", detail?: string) => void,
 ): Promise<MintReceipt> {
-  const { walletClient, publicClient, minter, prepared } = args;
+  const { walletClient, publicClient, minter, registry, prepared } = args;
   const account = walletClient.account;
   if (account === undefined) throw new MintError("failed", "the wallet client has no account");
 
-  const params = buildMintParams(prepared);
+  const params = buildMintParams(registry, prepared);
 
   onPhase?.("simulating");
   let request;
@@ -237,16 +256,31 @@ export async function mintCapsule(
 }
 
 /**
- * Can the minter still write records?
+ * Can the minter still write records under this parent?
  *
  * A free read, and the one precondition of a mint that is invisible from the
- * form: `CapsuleMinter` writes this name's records with its own root roles on
- * `PermissionedResolver`, and the resolver's admin can revoke them. If that has
- * happened every mint reverts at step 3 — after the name is already registered.
+ * form: `CapsuleMinter` writes a name's records with its own root roles on that
+ * parent's `PermissionedResolver`, and the resolver's admin can revoke them. If
+ * that has happened every mint reverts at the record writes — after the name is
+ * already registered.
+ *
+ * Per parent now, because there is no longer a single resolver to ask about. The
+ * launch form gets this from `readiness()` along with everything else and does
+ * not call this; it is kept for `scripts/check-mint.ts` and the health route,
+ * which check one known parent rather than whichever one a user picked.
  */
-export async function minterCanWrite(publicClient: PublicClient, minter: Address): Promise<boolean> {
+export async function minterCanWrite(
+  publicClient: PublicClient,
+  minter: Address,
+  resolver: Address,
+): Promise<boolean> {
   try {
-    await publicClient.readContract({ address: minter, abi: minterAbi, functionName: "checkResolverRoles" });
+    await publicClient.readContract({
+      address: minter,
+      abi: minterAbi,
+      functionName: "checkResolverRoles",
+      args: [resolver],
+    });
     return true;
   } catch {
     return false;

@@ -239,7 +239,7 @@ async function handle(input: {
 
   // --- 5. validation, before the signature, because the message names the ---
   //        capsule name and the owner and both come out of the body.
-  const parsed = parsePrepareRequest(body, env.parentName);
+  const parsed = parsePrepareRequest(body, env.defaultParentName);
   if (!parsed.ok) {
     return {
       response: fail(422, "the request has problems", "validation failed", { problems: parsed.problems }),

@@ -37,8 +37,9 @@ import { createPublicClient, http, zeroAddress, type Address } from "viem";
 import { sepolia } from "viem/chains";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { readFileSync } from "node:fs";
-import { minterAbi, registryAbi } from "../lib/capsule/chain";
+import { ETH_REGISTRY, minterAbi, registryAbi } from "../lib/capsule/chain";
 import { loadProvisionerEnv, loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
+import { encodeParent } from "../lib/capsule/parent";
 import {
   createMachine,
   destroyMachine,
@@ -144,16 +145,16 @@ async function main() {
   );
 
   // --- 2. the request and the names it builds -------------------------------
-  const good = parseProvisionRequest({ label: "analyst" }, env.parentName);
+  const good = parseProvisionRequest({ label: "analyst" }, env.defaultParentName);
   check(
     "\na valid label parses to the capsule name",
-    good.ok && good.capsuleName === `analyst.${env.parentName}`,
+    good.ok && good.capsuleName === `analyst.${env.defaultParentName}`,
     good.ok ? good.capsuleName : JSON.stringify(good.problems),
   );
-  check("  an uppercase label is refused", !parseProvisionRequest({ label: "Analyst" }, env.parentName).ok);
-  check("  an empty label is refused", !parseProvisionRequest({ label: "" }, env.parentName).ok);
-  check("  a label with a dot is refused", !parseProvisionRequest({ label: "a.b" }, env.parentName).ok);
-  check("  a non-object body is refused", !parseProvisionRequest("analyst", env.parentName).ok);
+  check("  an uppercase label is refused", !parseProvisionRequest({ label: "Analyst" }, env.defaultParentName).ok);
+  check("  an empty label is refused", !parseProvisionRequest({ label: "" }, env.defaultParentName).ok);
+  check("  a label with a dot is refused", !parseProvisionRequest({ label: "a.b" }, env.defaultParentName).ok);
+  check("  a non-object body is refused", !parseProvisionRequest("analyst", env.defaultParentName).ok);
 
   const longName = machineNameFor("a".repeat(63));
   check("  the machine name stays inside Fly's 63 characters", longName.length <= 63, `${longName.length}`);
@@ -214,12 +215,19 @@ async function main() {
   }
 
   // --- 4. the chain the authorisation rests on ------------------------------
+  //
+  // Found from the parent name, the same way the route finds it. `minter.REGISTRY()`
+  // used to answer this and is gone: one minter serves every connected name, so
+  // there is no single registry to ask it about, and `getSubregistry` is the
+  // general form of the question.
+  const parent = encodeParent(env.defaultParentName);
   const registry = await client.readContract({
-    address: env.minterAddress,
-    abi: minterAbi,
-    functionName: "REGISTRY",
+    address: ETH_REGISTRY,
+    abi: registryAbi,
+    functionName: "getSubregistry",
+    args: [parent.label],
   });
-  check("\nthe minter names its registry", registry !== zeroAddress, registry);
+  check(`\n${parent.name} has a subregistry`, registry !== zeroAddress, registry);
 
   const freeOwner = await client.readContract({
     address: registry,
@@ -256,7 +264,7 @@ async function main() {
       "a transfer would legitimately break this — findOwner is the one the route trusts",
     );
 
-    const identity = await readIdentity(client, `${label}.${env.parentName}`);
+    const identity = await readIdentity(client, `${label}.${env.defaultParentName}`);
     check("  it publishes an agent in addr", identity.address !== zeroAddress, identity.address);
     check(
       "  its agent-model is one the runner can boot",
@@ -271,14 +279,14 @@ async function main() {
   check("\nthe Fly token can list machines", true, `${machines.length} in ${env.flyAppName}`);
   check(
     "  a capsule with no machine reports none",
-    (await findCapsuleMachine(fly, `${FREE_LABEL}.${env.parentName}`)) === null,
+    (await findCapsuleMachine(fly, `${FREE_LABEL}.${env.defaultParentName}`)) === null,
   );
 
   // --- 6. the config Fly actually accepts -----------------------------------
   if (process.env.CAPSULE_CHECK_FLY_CREATE !== "1") {
     console.log("\n  skip  machine create — set CAPSULE_CHECK_FLY_CREATE=1 to create one and destroy it");
   } else {
-    const capsuleName = `${FREE_LABEL}.${env.parentName}`;
+    const capsuleName = `${FREE_LABEL}.${env.defaultParentName}`;
     let created;
     try {
       created = await createMachine(fly, {
@@ -357,7 +365,7 @@ async function main() {
       (
         await status("{", {
           [HEADER_TIMESTAMP]: String(now),
-          [HEADER_SIGNATURE]: await sign(`x.${env.parentName}`, now),
+          [HEADER_SIGNATURE]: await sign(`x.${env.defaultParentName}`, now),
         })
       ).code === 400,
     );
@@ -366,7 +374,7 @@ async function main() {
       (
         await status(JSON.stringify({ label: "NOT A LABEL" }), {
           [HEADER_TIMESTAMP]: String(now),
-          [HEADER_SIGNATURE]: await sign(`x.${env.parentName}`, now),
+          [HEADER_SIGNATURE]: await sign(`x.${env.defaultParentName}`, now),
         })
       ).code === 422,
     );
@@ -375,7 +383,7 @@ async function main() {
       (
         await status(JSON.stringify({ label: FREE_LABEL }), {
           [HEADER_TIMESTAMP]: String(now - 3600),
-          [HEADER_SIGNATURE]: await sign(`${FREE_LABEL}.${env.parentName}`, now - 3600),
+          [HEADER_SIGNATURE]: await sign(`${FREE_LABEL}.${env.defaultParentName}`, now - 3600),
         })
       ).code === 403,
     );
@@ -391,7 +399,7 @@ async function main() {
 
     const unminted = await status(JSON.stringify({ label: FREE_LABEL }), {
       [HEADER_TIMESTAMP]: String(now),
-      [HEADER_SIGNATURE]: await sign(`${FREE_LABEL}.${env.parentName}`, now),
+      [HEADER_SIGNATURE]: await sign(`${FREE_LABEL}.${env.defaultParentName}`, now),
     });
     check("  an unminted name is refused", unminted.code === 404, unminted.error);
 
@@ -401,7 +409,7 @@ async function main() {
     if (sample?.label !== undefined) {
       const notOwner = await status(JSON.stringify({ label: sample.label }), {
         [HEADER_TIMESTAMP]: String(now),
-        [HEADER_SIGNATURE]: await sign(`${sample.label}.${env.parentName}`, now),
+        [HEADER_SIGNATURE]: await sign(`${sample.label}.${env.defaultParentName}`, now),
       });
       check(
         "  a valid signature from someone who is not the owner is refused",
@@ -414,7 +422,7 @@ async function main() {
       // it or one signature would work on every capsule the signer owns.
       const wrongName = await status(JSON.stringify({ label: sample.label }), {
         [HEADER_TIMESTAMP]: String(now),
-        [HEADER_SIGNATURE]: await sign(`somethingelse.${env.parentName}`, now),
+        [HEADER_SIGNATURE]: await sign(`somethingelse.${env.defaultParentName}`, now),
       });
       check(
         "  a signature for a different name does not authorise this one",
@@ -427,7 +435,7 @@ async function main() {
     // which is what proves the launchpad is signing what the route verifies.
     try {
       await provisionCapsuleRequest(
-        { label: FREE_LABEL, capsuleName: `${FREE_LABEL}.${env.parentName}` },
+        { label: FREE_LABEL, capsuleName: `${FREE_LABEL}.${env.defaultParentName}` },
         (args) => stranger.signMessage({ message: args.message }),
         { baseUrl: BASE },
       );

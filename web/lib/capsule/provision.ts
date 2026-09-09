@@ -17,29 +17,44 @@
  */
 import type { Address, Hex } from "viem";
 import { MACHINE_CAPSULE_NAME } from "./fly";
+import { parentNameProblems } from "./parent";
 import { labelProblems } from "./prepare";
 
 export type ProvisionProblem = { field: string; message: string };
 
 export function parseProvisionRequest(
   body: unknown,
-  parentName: string,
-): { ok: true; label: string; capsuleName: string } | { ok: false; problems: ProvisionProblem[] } {
+  defaultParentName: string,
+):
+  | { ok: true; label: string; parentName: string; capsuleName: string }
+  | { ok: false; problems: ProvisionProblem[] } {
   if (typeof body !== "object" || body === null || Array.isArray(body)) {
     return { ok: false, problems: [{ field: "body", message: "expected a JSON object" }] };
   }
 
-  const raw = (body as Record<string, unknown>).label;
+  const fields = body as Record<string, unknown>;
+  const raw = fields.label;
   const label = typeof raw === "string" ? raw.trim() : "";
+
+  // Which name this capsule sits under. Optional and defaulted, like the prepare
+  // route's, and safe for the same reason: the full capsule name built from it is
+  // inside the message the owner signed, so a parent altered in transit fails
+  // signature recovery rather than booting a machine for the wrong name.
+  const rawParent = fields.parent;
+  const parentName = (typeof rawParent === "string" && rawParent.trim() !== ""
+    ? rawParent.trim()
+    : defaultParentName
+  ).toLowerCase();
 
   // The same rules the prepare route validated the label under, so a name that
   // could be minted can always be provisioned. Re-validated rather than trusted
   // because this route reads it out of a request body, and it goes on to build
   // a machine name and an ENS name out of it.
   const problems = labelProblems(label).map((message) => ({ field: "label", message }));
+  for (const message of parentNameProblems(parentName)) problems.push({ field: "parent", message });
   if (problems.length > 0) return { ok: false, problems };
 
-  return { ok: true, label, capsuleName: `${label}.${parentName}`.toLowerCase() };
+  return { ok: true, label, parentName, capsuleName: `${label}.${parentName}`.toLowerCase() };
 }
 
 /**

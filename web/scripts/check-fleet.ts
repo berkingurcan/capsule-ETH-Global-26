@@ -15,12 +15,13 @@
  *
  * Run with:  npm run check:fleet
  */
-import { createPublicClient, http } from "viem";
+import { createPublicClient, http, zeroAddress } from "viem";
 import { sepolia } from "viem/chains";
-import { minterAbi } from "../lib/capsule/chain";
+import { ETH_REGISTRY, minterAbi, registryAbi } from "../lib/capsule/chain";
 import { RECORD_KEYS } from "../lib/capsule/records";
 import { readFleet, textResourceOf } from "../lib/capsule/fleet";
 import { loadServerEnv } from "../lib/capsule/env";
+import { encodeParent } from "../lib/capsule/parent";
 
 let failures = 0;
 function check(label: string, ok: boolean, detail = "") {
@@ -35,12 +36,37 @@ async function main() {
     transport: http(env.rpcUrl, { batch: true }),
   });
 
-  console.log(`minter ${env.minterAddress} from block ${env.minterBlock}\n`);
+  // The deployment's default parent. One minter serves every connected name, so
+  // this check is scoped to one of them — the one this deployment is about — and
+  // says so, rather than pretending "the fleet" is still a single thing.
+  const parent = encodeParent(env.defaultParentName);
+  console.log(`minter ${env.minterAddress} from block ${env.minterBlock}`);
+  console.log(`parent ${parent.name} · node ${parent.node}\n`);
+
+  const registry = await client.readContract({
+    address: ETH_REGISTRY,
+    abi: registryAbi,
+    functionName: "getSubregistry",
+    args: [parent.label],
+  });
+  check(`${parent.name} has a subregistry`, registry !== zeroAddress, registry);
+
+  const [connected, registrarGranted, resolverRolesGranted, open] = await client.readContract({
+    address: env.minterAddress,
+    abi: minterAbi,
+    functionName: "readiness",
+    args: [registry, env.minterAddress],
+  });
+  check("  the parent is connected to the minter", connected);
+  check("  the minter holds ROLE_REGISTRAR", registrarGranted);
+  check("  the minter holds its resolver roles", resolverRolesGranted);
+  console.log(`  open to anyone: ${open}\n`);
 
   const started = Date.now();
   const fleet = await readFleet(client as never, {
     minter: env.minterAddress,
-    parentName: env.parentName,
+    parentName: parent.name,
+    parentNode: parent.node,
     fromBlock: env.minterBlock,
   });
   console.log(`read ${fleet.capsules.length} capsule(s) at block ${fleet.block} in ${Date.now() - started}ms\n`);
@@ -70,7 +96,7 @@ async function main() {
       address: env.minterAddress,
       abi: minterAbi,
       functionName: "isAgentAuthorized",
-      args: [capsule.label, capsule.agent],
+      args: [registry, capsule.label, capsule.agent],
     });
     check("  authorized agrees with isAgentAuthorized", capsule.authorized === authorized);
 

@@ -65,10 +65,11 @@
  */
 import { NextResponse } from "next/server";
 import { formatEther, recoverMessageAddress, zeroAddress, type Address, type Hex } from "viem";
-import { createServerClient, minterAbi, registryAbi } from "@/lib/capsule/chain";
+import { ETH_REGISTRY, createServerClient, registryAbi } from "@/lib/capsule/chain";
 import { loadProvisionerEnv, loadServerEnv, InvalidEnvError, MissingEnvError } from "@/lib/capsule/env";
 import { createMachine, findCapsuleMachine, FlyError, type FlyConfig } from "@/lib/capsule/fly";
 import { fundAgent, FundingError } from "@/lib/capsule/fund";
+import { encodeParent } from "@/lib/capsule/parent";
 import { parseModelRef } from "@/lib/capsule/providers";
 import {
   machineMetadata,
@@ -141,11 +142,11 @@ export async function POST(request: Request): Promise<NextResponse> {
     throw error;
   }
 
-  const parsed = parseProvisionRequest(body, env.parentName);
+  const parsed = parseProvisionRequest(body, env.defaultParentName);
   if (!parsed.ok) {
     return fail(422, "the request has problems", "validation failed", { problems: parsed.problems });
   }
-  const { label, capsuleName } = parsed;
+  const { label, parentName, capsuleName } = parsed;
 
   // --- 2. freshness --------------------------------------------------------
   const timestamp = Number(timestampHeader);
@@ -155,9 +156,12 @@ export async function POST(request: Request): Promise<NextResponse> {
 
   // --- 3. recovery ---------------------------------------------------------
   //
-  // The capsule name is inside the signed message and was rebuilt here from our
-  // own CAPSULE_PARENT_NAME, so a caller signing against a stale parent fails
-  // this check rather than booting a machine for a name that does not exist.
+  // The capsule name is inside the signed message and was rebuilt here from the
+  // request's own label and parent, so a caller signing against a different name
+  // than the one it sent fails this check rather than booting a machine for a
+  // name that does not exist. The parent being caller-supplied costs nothing
+  // here: whatever it is, it is what got signed, and the ownership check below
+  // is what decides whether the signer may act on it.
   let signer: Address;
   try {
     signer = await recoverMessageAddress({
@@ -184,11 +188,26 @@ export async function POST(request: Request): Promise<NextResponse> {
   // thing is the correct trade.
   let owner: Address;
   try {
+    // The parent's own subregistry, found from the name rather than from the
+    // minter. `minter.REGISTRY()` used to answer this and no longer exists: one
+    // minter now serves every connected name, so there is no single registry to
+    // ask it about. `getSubregistry` is the general form of the same question and
+    // needs no configuration — the chain knows where each name's subnames live.
     const registry = await client.readContract({
-      address: env.minterAddress,
-      abi: minterAbi,
-      functionName: "REGISTRY",
+      address: ETH_REGISTRY,
+      abi: registryAbi,
+      functionName: "getSubregistry",
+      args: [encodeParent(parentName).label],
     });
+    if (registry === zeroAddress) {
+      // Not an outage and not an unowned name: the parent has no subregistry, so
+      // no capsule under it can exist and this one certainly was not minted.
+      return fail(
+        404,
+        `${parentName} has no subregistry, so ${capsuleName} cannot have been minted`,
+        `${capsuleName}: getSubregistry(${parentName}) is the zero address`,
+      );
+    }
     owner = await client.readContract({
       address: registry,
       abi: registryAbi,

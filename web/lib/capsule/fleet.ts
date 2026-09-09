@@ -139,6 +139,20 @@ export type Fleet = {
 export type FleetConfig = {
   minter: Address;
   parentName: string;
+  /**
+   * Namehash of `parentName`, passed to `getContractEvents` as a topic filter.
+   *
+   * This is what keeps one name's capsules out of another name's dashboard. The
+   * minter serves every connected parent from one address and one log stream, so
+   * without it `/fleet?parent=berkin.eth` would list `trader.capsulefleet.eth`
+   * alongside `dev.berkin.eth` — and then read records for a name it built by
+   * gluing the wrong parent onto a label, which resolves to nothing and renders
+   * as a fleet of empty capsules rather than as an error.
+   *
+   * Taken as an argument rather than derived from `parentName` here so it is
+   * derived once, by the caller that already validated the name.
+   */
+  parentNode: Hex;
   /** The minter's deploy block. Scanning from 0 is not an option on a public RPC. */
   fromBlock: bigint;
 };
@@ -299,7 +313,7 @@ async function readAllRecords(
  * minter never touched has no such claim to read.
  */
 export async function readFleet(client: PublicClient, config: FleetConfig): Promise<Fleet> {
-  const { minter, parentName, fromBlock } = config;
+  const { minter, parentName, parentNode, fromBlock } = config;
 
   const [head, minted, registryInterop] = await Promise.all([
     client.getBlockNumber(),
@@ -307,6 +321,10 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
       address: minter,
       abi: minterAbi,
       eventName: "CapsuleMinted",
+      // `parentNode` is the first indexed field, so this is a topic filter the RPC
+      // applies — not a post-filter here. One name's dashboard therefore costs the
+      // same one call whether the minter serves one parent or a hundred.
+      args: { parentNode },
       fromBlock,
       toBlock: "latest",
     }),

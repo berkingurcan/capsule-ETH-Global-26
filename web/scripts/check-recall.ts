@@ -40,10 +40,12 @@ import {
 } from "viem";
 import { sepolia } from "viem/chains";
 import {
+  ETH_REGISTRY,
   ROLE_SET_TEXT,
   ROLE_SET_TEXT_ADMIN,
   minterAbi,
   nameResourceOf,
+  registryAbi,
   resolverAdminAbi,
   textResourceOf,
 } from "../lib/capsule/chain";
@@ -51,6 +53,7 @@ import { RECORD_KEYS } from "../lib/capsule/records";
 import { readFleet } from "../lib/capsule/fleet";
 import { buildRecallArgs, recallPreflight, rolesChangedFrom, type RecallTarget } from "../lib/capsule/recall";
 import { loadServerEnv } from "../lib/capsule/env";
+import { encodeParent } from "../lib/capsule/parent";
 
 /** Holds no roles anywhere. Stands in for "someone else's wallet". */
 const STRANGER = "0x000000000000000000000000000000000000dEaD" as Address;
@@ -75,9 +78,18 @@ async function main() {
 
   console.log(`minter ${env.minterAddress} on ${sepolia.name}\n`);
 
+  const parent = encodeParent(env.defaultParentName);
+  const registry = await client.readContract({
+    address: ETH_REGISTRY,
+    abi: registryAbi,
+    functionName: "getSubregistry",
+    args: [parent.label],
+  });
+
   const fleet = await readFleet(client as never, {
     minter: env.minterAddress,
-    parentName: env.parentName,
+    parentName: parent.name,
+    parentNode: parent.node,
     fromBlock: env.minterBlock,
   });
   check("fleet is not empty", fleet.capsules.length > 0, `${fleet.capsules.length} minted`);
@@ -113,7 +125,7 @@ async function main() {
       address: env.minterAddress,
       abi: minterAbi,
       functionName: "dnsNameOf",
-      args: [capsule.label],
+      args: [registry, capsule.label],
     });
     check("  dnsName matches CapsuleMinter.dnsNameOf", dnsName === onChainDns, `${dnsName}`);
     check("  the key is the heartbeat key", key === RECORD_KEYS.heartbeat, key);

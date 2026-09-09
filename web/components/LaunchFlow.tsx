@@ -8,9 +8,16 @@ import { CHAIN } from "@/lib/capsule/chain";
 import { RECORD_KEYS } from "@/lib/capsule/records";
 import { shortAddress, useWallet } from "@/lib/wallet/WalletProvider";
 import { ROLES, capColor, type Role } from "@/lib/capsule/roles";
-import { PARENT_NAME, PARENT_NAME_DISPLAY, PARENT_NAME_MISSING } from "@/lib/capsule/public-env";
+import { DEFAULT_PARENT_DISPLAY, DEFAULT_PARENT_MISSING } from "@/lib/capsule/public-env";
+import {
+  encodeParent,
+  parentBlocker,
+  parentNameProblems,
+  readParentStatus,
+  type ParentStatus,
+} from "@/lib/capsule/parent";
 import { labelProblems, telegramTokenProblems } from "@/lib/capsule/prepare";
-import { mintCapsule, minterCanWrite, MintError, type MintReceipt } from "@/lib/capsule/mint";
+import { mintCapsule, MintError, type MintReceipt } from "@/lib/capsule/mint";
 import {
   prepareCapsuleRequest,
   PrepareError,
@@ -176,10 +183,27 @@ function customDraft(slug: string): Draft {
   };
 }
 
-export default function LaunchFlow({ taken, minter }: { taken: string[]; minter: string | null }) {
+export default function LaunchFlow({
+  taken,
+  minter,
+  defaultParent,
+}: {
+  /** Labels already minted under `defaultParent`, read at server render. */
+  taken: string[];
+  minter: string | null;
+  /** `CAPSULE_PARENT_NAME` — where the form opens, not where it is stuck. */
+  defaultParent: string;
+}) {
   // Preselect the first two presets that are still available, so the form does
   // not open with a selection the mint would reject.
   const free = ROLES.filter((r) => !taken.includes(r.slug)).slice(0, 2).map((r) => r.slug);
+
+  /* The name every capsule in this session lands under, settled on step 1 and
+     read straight off the chain — `ParentStatus`, not a string, because every
+     later step needs something from it: the registry to mint into, whether this
+     wallet may mint there at all, and the name to print. */
+  const [parent, setParent] = useState<ParentStatus | null>(null);
+  const parentName = parent?.parent.name ?? defaultParent;
 
   const [step, setStep] = useState(0);
   const [drafts, setDrafts] = useState<Draft[]>(() =>
@@ -193,8 +217,16 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
 
   /* A label minted in this session is taken as surely as one that was taken
      when the page loaded — `taken` is a snapshot from the server render and
-     does not know about the transactions we just sent. */
-  const unavailable = [...taken, ...minted.map((m) => m.draft.slug)];
+     does not know about the transactions we just sent.
+
+     `taken` only describes the DEFAULT parent, because that is the only fleet
+     the server rendered. Point the form at another name and the list empties:
+     `dev` being taken under capsulefleet.eth says nothing about dev.berkin.eth.
+     Nothing is lost by it — an unavailable label is still caught twice before it
+     costs anything, by the prepare route's 409 and by the mint simulation — the
+     form just stops greying it out in advance. */
+  const takenHere = parentName === defaultParent ? taken : [];
+  const unavailable = [...takenHere, ...minted.map((m) => m.draft.slug)];
 
   function toggle(r: Role) {
     if (unavailable.includes(r.slug)) return;
@@ -228,7 +260,9 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
             <p className="kicker" style={{ margin: 0 }}>
               Launchpad
             </p>
-            <h2 style={{ fontSize: 30, marginTop: 6 }}>Hire an agent under {PARENT_NAME_DISPLAY}</h2>
+            <h2 style={{ fontSize: 30, marginTop: 6 }}>
+              Hire an agent under {parent?.parent.name ?? DEFAULT_PARENT_DISPLAY}
+            </h2>
           </div>
           {step > 0 && step < 3 && (
             <button className="btn btn-sm btn-ghost" onClick={() => setStep(0)}>
@@ -246,11 +280,20 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
           ))}
         </div>
 
-        {step === 0 && <StepWallet minter={minter} next={() => setStep(1)} />}
+        {step === 0 && (
+          <StepWallet
+            minter={minter}
+            defaultParent={defaultParent}
+            parent={parent}
+            setParent={setParent}
+            next={() => setStep(1)}
+          />
+        )}
 
         {step === 1 && (
           <StepRoles
             picked={picked}
+            parentName={parentName}
             taken={unavailable}
             toggle={toggle}
             remove={removeDraft}
@@ -278,6 +321,7 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
           <StepMint
             drafts={drafts}
             minter={minter}
+            parent={parent}
             already={minted.length}
             back={() => setStep(2)}
             /* Reported as each one lands, not in a batch at the end. A capsule
@@ -292,7 +336,7 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
           />
         )}
 
-        {step === 4 && <StepProvision minted={minted} />}
+        {step === 4 && <StepProvision minted={minted} parentName={parentName} />}
       </div>
     </main>
   );
@@ -311,7 +355,19 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
  * requires, and the one item that can fail invisibly — the minter's roles —
  * is read off the chain rather than asserted.
  */
-function StepWallet({ minter, next }: { minter: string | null; next: () => void }) {
+function StepWallet({
+  minter,
+  defaultParent,
+  parent,
+  setParent,
+  next,
+}: {
+  minter: string | null;
+  defaultParent: string;
+  parent: ParentStatus | null;
+  setParent: (status: ParentStatus | null) => void;
+  next: () => void;
+}) {
   const {
     status,
     address,
@@ -325,26 +381,58 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
   } = useWallet();
   const connected = status === "connected" && address !== null;
 
-  const [roles, setRoles] = useState<"unknown" | "checking" | "ok" | "revoked">("unknown");
+  /* The name being checked. Starts at the deployment's default so the common
+     case — a visitor trying the demo — is one click, and is editable so the
+     uncommon and more interesting case is two. */
+  const [raw, setRaw] = useState(defaultParent);
+  const [reading, setReading] = useState(false);
+  const [readError, setReadError] = useState<string | null>(null);
 
-  useEffect(() => {
-    if (!chainOk || minter === null) {
-      setRoles("unknown");
-      return;
-    }
+  const nameProblems = raw.trim() === "" ? [] : parentNameProblems(raw);
+  const nameOk = raw.trim() !== "" && nameProblems.length === 0;
+
+  /* One read answers every question this step used to ask separately.
+
+     It replaces `minterCanWrite`, which asked whether the minter still held its
+     resolver roles — a sensible question when there was one resolver, and an
+     unanswerable one now: there is a resolver per parent, and which one depends
+     on the name in the field above. `readiness()` asks it about THIS name, along
+     with the three other things that have to be true, and answers all four in a
+     single call. */
+  const check = useCallback(async () => {
+    if (!connected || !chainOk || minter === null || !nameOk) return;
     const client = getPublicClient();
     if (client === null) return;
-    let live = true;
-    setRoles("checking");
-    void minterCanWrite(client, minter as Address).then((ok) => {
-      if (live) setRoles(ok ? "ok" : "revoked");
-    });
-    return () => {
-      live = false;
-    };
-  }, [chainOk, minter, getPublicClient]);
+    setReading(true);
+    setReadError(null);
+    try {
+      const status = await readParentStatus(
+        client,
+        minter as Address,
+        encodeParent(raw),
+        address as Address,
+      );
+      setParent(status);
+    } catch (error) {
+      setReadError(error instanceof Error ? error.message : "could not read this name on chain");
+      setParent(null);
+    } finally {
+      setReading(false);
+    }
+  }, [connected, chainOk, minter, nameOk, raw, address, getPublicClient, setParent]);
 
-  const ready = connected && chainOk && minter !== null && roles === "ok" && !PARENT_NAME_MISSING;
+  /* Checked automatically for the default name only. Typing someone else's name
+     and having the page fire a burst of RPC reads at every keystroke would be
+     both wasteful and confusing — a name is checked when it is submitted. */
+  useEffect(() => {
+    if (connected && chainOk && minter !== null && raw === defaultParent && parent === null) {
+      void check();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connected, chainOk, minter, raw, defaultParent]);
+
+  const blocker = parent === null ? null : parentBlocker(parent);
+  const ready = connected && chainOk && minter !== null && parent !== null && blocker === null;
 
   const checks: [string, string, boolean][] = [
     ["A wallet is connected", address ?? "no account", connected],
@@ -355,15 +443,22 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
       minter !== null,
     ],
     [
-      "The minter can still write records",
-      roles === "ok"
-        ? "checkResolverRoles() passed"
-        : roles === "revoked"
-          ? "its resolver roles were revoked — every mint would revert"
-          : roles === "checking"
-            ? "reading the resolver…"
-            : "checked once a wallet is connected",
-      roles === "ok",
+      "The parent name is connected to Capsule",
+      parent === null
+        ? reading
+          ? "reading the chain…"
+          : "checked once a wallet is connected"
+        : parent.connected
+          ? `registry ${shortAddress(parent.registry as Address)}`
+          : "this name has not been connected yet",
+      parent?.connected === true,
+    ],
+    [
+      "Capsule may mint under it",
+      parent === null
+        ? "checked with the name above"
+        : (blocker ?? "ROLE_REGISTRAR and resolver roles are both granted"),
+      parent !== null && blocker === null,
     ],
   ];
 
@@ -373,19 +468,65 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
         <span className="stepnum">01</span>
         <span className="tag">Connect wallet</span>
       </div>
-      <p className="stitle">Connect the wallet that will own the agents</p>
+      <p className="stitle">Connect a wallet, and pick the name to launch under</p>
       <p className="ssub">
-        Capsule mints subnames under <span className="mono">{PARENT_NAME_DISPLAY}</span>, which the minter contract
-        holds. You do not need to own the parent — you need the wallet you want the subname, and its kill switch,
-        to belong to.
+        Every agent is a subname. Launch under{" "}
+        <span className="mono">{DEFAULT_PARENT_DISPLAY}</span> to try the demo, or name any{" "}
+        <span className="mono">.eth</span> you control and your agents land under that instead —{" "}
+        <span className="mono">dev.yourname.eth</span>. Using your own name takes a one-time setup on{" "}
+        <Link href="/connect">Connect a name</Link>.
       </p>
+
+      <div className="field" style={{ maxWidth: 460, marginBottom: 22 }}>
+        <label className="label" htmlFor="launch-parent">
+          Parent name
+        </label>
+        <div className="row" style={{ gap: 8 }}>
+          <input
+            id="launch-parent"
+            className="input mono"
+            value={raw}
+            autoCapitalize="off"
+            autoCorrect="off"
+            spellCheck={false}
+            onChange={(e) => {
+              setRaw(e.target.value.toLowerCase());
+              // The old answer describes the old name. Keeping it on screen while
+              // the field says something else is how a form ends up minting under
+              // a name nobody checked.
+              setParent(null);
+              setReadError(null);
+            }}
+            onKeyDown={(e) => {
+              if (e.key === "Enter") void check();
+            }}
+          />
+          <button
+            className="btn btn-sm"
+            disabled={!connected || !chainOk || !nameOk || reading || minter === null}
+            onClick={() => void check()}
+          >
+            {reading ? "Checking…" : "Check"}
+          </button>
+        </div>
+        {nameProblems.map((problem) => (
+          <span key={problem} className="hint" style={{ color: "var(--alarm)" }}>
+            {problem}
+          </span>
+        ))}
+        {readError !== null && (
+          <span className="hint" style={{ color: "var(--alarm)" }}>
+            {readError}
+          </span>
+        )}
+      </div>
 
       <div className="grid g-side" style={{ alignItems: "stretch" }}>
         <div className="tile shell" style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
           <Capsule size={64} cap={ready ? "#1B4FD8" : "#C4D5F6"} />
           <div style={{ minWidth: 0 }}>
             <div className="ensname" style={{ fontSize: 24 }}>
-              {PARENT_NAME_DISPLAY}
+              {parent?.parent.name ?? (raw.trim() === "" ? DEFAULT_PARENT_DISPLAY : raw)}
             </div>
             <div className="mono" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>
               {connected ? shortAddress(address) + " · connected" : "no wallet connected"}
@@ -464,13 +605,30 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
         </div>
       )}
 
-      {PARENT_NAME_MISSING && (
+      {DEFAULT_PARENT_MISSING && (
         <div className="notice" style={{ marginTop: 20, borderColor: "var(--line)" }}>
           <span className="tag">Misconfigured</span>
           <p style={{ margin: 0 }}>
-            <span className="mono">NEXT_PUBLIC_CAPSULE_PARENT_NAME</span> is unset, so this form does not know what
-            it would be minting under. Nothing can be launched until it is set.
+            <span className="mono">NEXT_PUBLIC_CAPSULE_PARENT_NAME</span> is unset, so this form has no default
+            name to open on. You can still launch under a name of your own by typing it above.
           </p>
+        </div>
+      )}
+
+      {/* The interesting refusal, and the one with somewhere to go. A name that
+          checks out but is not connected is not an error — it is the state every
+          name starts in, and /connect is the fix. */}
+      {parent !== null && blocker !== null && (
+        <div className="notice" style={{ marginTop: 20, borderColor: "var(--line)" }}>
+          <span className="tag">Not ready</span>
+          <p style={{ margin: 0 }}>{blocker}</p>
+          {!parent.connected && (
+            <div className="row" style={{ gap: 10, marginTop: 12 }}>
+              <Link className="btn btn-sm btn-primary" href="/connect">
+                Connect {parent.parent.name} →
+              </Link>
+            </div>
+          )}
         </div>
       )}
 
@@ -482,9 +640,11 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
               ? "Connect a wallet to continue."
               : !chainOk
                 ? "Wrong network."
-                : roles === "revoked"
-                  ? "The minter cannot write to the resolver."
-                  : "Checking the minter…"}
+                : parent === null
+                  ? reading
+                    ? "Checking the name…"
+                    : "Check a parent name to continue."
+                  : (blocker ?? "Checking…")}
         </span>
         <button className="btn btn-primary push" onClick={next} disabled={!ready}>
           Pick roles →
@@ -498,6 +658,7 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
 
 function StepRoles({
   picked,
+  parentName,
   taken,
   toggle,
   remove,
@@ -508,6 +669,8 @@ function StepRoles({
   next,
 }: {
   picked: string[];
+  /** Settled on the previous step. Printed under every label on this one. */
+  parentName: string;
   /** Labels already minted under the parent, read from CapsuleMinted logs. */
   taken: string[];
   toggle: (r: Role) => void;
@@ -537,7 +700,7 @@ function StepRoles({
       </div>
       <p className="stitle">Pick the roles you want to hire</p>
       <p className="ssub">
-        Each role becomes a subname under <span className="mono">{PARENT_NAME_DISPLAY}</span>. The label is the job — and
+        Each role becomes a subname under <span className="mono">{parentName}</span>. The label is the job — and
         because the agent reads its own name at boot, the label is also half its configuration.
       </p>
 
@@ -568,7 +731,7 @@ function StepRoles({
               </div>
               <div className="ensname" style={{ fontSize: 13.5 }}>
                 {r.slug}
-                <span className="p">.{PARENT_NAME_DISPLAY}</span>
+                <span className="p">.{parentName}</span>
               </div>
             </button>
           );
@@ -918,6 +1081,7 @@ const IDLE: Run = { phase: "idle", lines: [], error: null, prepared: null, recei
 function StepMint({
   drafts,
   minter,
+  parent,
   already,
   back,
   onMinted,
@@ -925,6 +1089,8 @@ function StepMint({
 }: {
   drafts: Draft[];
   minter: string | null;
+  /** Settled on step 1, and null only if someone skipped it. */
+  parent: ParentStatus | null;
   /** How many capsules minted on an earlier visit to this step. */
   already: number;
   back: () => void;
@@ -947,6 +1113,9 @@ function StepMint({
   const say = useCallback((i: number, line: string) => {
     setRuns((r) => r.map((x, j) => (j === i ? { ...x, lines: [...x.lines, line] } : x)));
   }, []);
+
+  /** The name to print. Falls back only if step 1 was somehow skipped. */
+  const parentLabel = parent?.parent.name ?? DEFAULT_PARENT_DISPLAY;
 
   const running = active !== null;
   const doneCount = useMemo(() => runs.filter((r) => r.receipt !== null).length, [runs]);
@@ -974,6 +1143,10 @@ function StepMint({
       update(i, { phase: "failed", error: "CAPSULE_MINTER_ADDRESS is not set on the server." });
       return false;
     }
+    if (parent === null || parent.registry === null) {
+      update(i, { phase: "failed", error: "No parent name was chosen — go back to the first step." });
+      return false;
+    }
 
     let prepared = runs[i]!.prepared;
 
@@ -993,7 +1166,7 @@ function StepMint({
             providerKey: draft.providerKey,
           },
           (args) => walletClient.signMessage({ account: address, message: args.message }),
-          { parentName: PARENT_NAME }
+          { parentName: parent.parent.name }
         );
       } catch (error) {
         const message =
@@ -1019,7 +1192,16 @@ function StepMint({
 
     try {
       const receipt = await mintCapsule(
-        { walletClient, publicClient, minter: minter as Address, prepared },
+        {
+          walletClient,
+          publicClient,
+          minter: minter as Address,
+          // Which name this lands under. The one argument to `mint()` that does
+          // not come from the prepare response, because the prepare route seals
+          // a prompt and has no business choosing anybody's parent.
+          registry: parent.registry as Address,
+          prepared,
+        },
         (phase, detail) => {
           if (phase === "simulating") {
             update(i, { phase: "simulating" });
@@ -1035,7 +1217,7 @@ function StepMint({
       );
       update(i, { phase: "done", receipt, error: null });
       say(i, `CapsuleMinted · token ${receipt.tokenId} · block ${receipt.blockNumber}`);
-      say(i, `${receipt.gasUsed.toLocaleString()} gas · ${draft.slug}.${PARENT_NAME} is live on chain`);
+      say(i, `${receipt.gasUsed.toLocaleString()} gas · ${draft.slug}.${parent.parent.name} is live on chain`);
       onMinted({ draft, prepared, receipt });
       return true;
     } catch (error) {
@@ -1081,7 +1263,7 @@ function StepMint({
           </div>
           <div className="stack">
             {[
-              ["Register", queue.map((d) => d.slug).join(", ") + " under " + PARENT_NAME_DISPLAY],
+              ["Register", queue.map((d) => d.slug).join(", ") + " under " + parentLabel],
               ["Hand you control", "every resolver role on the name, including the kill switch"],
               ["Write records", "9 keys per agent, read by the runner at boot"],
               ["Grant the role", RECORD_KEYS.heartbeat + " — the only thing the agent may write"],
@@ -1142,7 +1324,7 @@ function StepMint({
                   <Capsule size={18} cap={d.cap} />
                   <span className="ensname" style={{ fontSize: 13 }}>
                     {d.slug}
-                    <span className="p">.{PARENT_NAME_DISPLAY}</span>
+                    <span className="p">.{parentLabel}</span>
                   </span>
                   <span className="push">
                     {run.phase === "done" ? (
@@ -1218,7 +1400,7 @@ type Boot = { phase: BootPhase; result: ProvisionResult | null; error: string | 
 
 const IDLE_BOOT: Boot = { phase: "idle", result: null, error: null };
 
-function StepProvision({ minted }: { minted: Minted[] }) {
+function StepProvision({ minted, parentName }: { minted: Minted[]; parentName: string }) {
   const { address, chainOk, getWalletClient } = useWallet();
   const [boots, setBoots] = useState<Record<string, Boot>>({});
   const [busy, setBusy] = useState(false);
@@ -1234,7 +1416,11 @@ function StepProvision({ minted }: { minted: Minted[] }) {
       set(m.draft.slug, { phase: "signing", result: null, error: null });
       try {
         const result = await provisionCapsuleRequest(
-          { label: m.draft.slug, capsuleName: `${m.draft.slug}.${PARENT_NAME}` },
+          {
+            label: m.draft.slug,
+            capsuleName: `${m.draft.slug}.${parentName}`,
+            parent: parentName,
+          },
           async (args) => {
             const signature = await walletClient.signMessage({ account: address, message: args.message });
             // Signed. Everything after this is the server's work, and it can
@@ -1300,7 +1486,7 @@ function StepProvision({ minted }: { minted: Minted[] }) {
                 <div style={{ minWidth: 0 }}>
                   <div className="ensname" style={{ fontSize: 14.5 }}>
                     {draft.slug}
-                    <span className="p">.{PARENT_NAME_DISPLAY}</span>
+                    <span className="p">.{parentName}</span>
                   </div>
                   <div className="hint">{prepared.config.model}</div>
                 </div>

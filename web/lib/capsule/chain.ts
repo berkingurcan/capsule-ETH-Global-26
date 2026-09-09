@@ -31,6 +31,66 @@ export const CHAIN = sepolia;
  *  through here rather than to a resolver we would have to know in advance. */
 export const UNIVERSAL_RESOLVER_V2 = "0x4a1817d13e9cf196f471725176355c1234b63c70" as const;
 
+/**
+ * `ETHRegistry` on the ENSv2 Sepolia beta — the registry holding every `.eth`
+ * second-level name.
+ *
+ * This is how a parent name is turned into something the minter can be pointed
+ * at: `getSubregistry("berkin")` answers the `PermissionedRegistry` that issues
+ * `*.berkin.eth`, and that registry address IS the handle `CapsuleMinter` keys
+ * a connected parent by. Nothing about a parent needs configuring in this app
+ * as a result — the chain knows where every name's subnames live.
+ *
+ * `getResolver` on this contract is deliberately never used to find a parent's
+ * resolver. It answers `PublicResolverV2` for `capsulefleet.eth`, which cannot
+ * authorize ENSv2-native names at all (contracts/NOTES.md, gotcha 2); the
+ * resolver capsules actually use is the one the parent's admin handed to
+ * `connectParent`, and it is read back from the minter.
+ */
+export const ETH_REGISTRY = "0xBDC85dD5b15D7ecb354cd7cb6f2c50b4f2c4F0E2" as const;
+
+/**
+ * The two addresses /connect needs to give a name its own resolver.
+ *
+ * An ENSv2 name does not come with a resolver that can authorize it. The one
+ * `ETHRegistry` reports is `PublicResolverV2`, whose `canModifyName` reverse-
+ * resolves through the ENSv1 NameWrapper and therefore fails for every name
+ * registered through the v2 registrar (contracts/NOTES.md, gotcha 2). So each
+ * parent needs a `PermissionedResolver` of its own, deployed as a UUPS proxy
+ * through `VerifiableFactory`:
+ *
+ *     deployProxy(PERMISSIONED_RESOLVER_IMPL, salt, initialize(admin, roles, []))
+ *
+ * The proxy address is deterministic in `(factory, proxyLogic, deployer, salt)`,
+ * so the same wallet with the same salt always lands on the same resolver — which
+ * is what makes a half-finished connect resumable rather than a source of
+ * abandoned resolvers.
+ */
+export const VERIFIABLE_FACTORY = "0x10dc6333cdfe1fcef624c6e0a8221b91804cd7ef" as const;
+export const PERMISSIONED_RESOLVER_IMPL = "0x9eae5c2730a7dd16bdd1dee6421a1b91e3b0365e" as const;
+
+/**
+ * `EACBaseRolesLib.ALL_ROLES` — bit 0 of every nybble.
+ *
+ * What a fresh resolver's admin is granted at root, so the name's owner can do
+ * anything on it: write records directly, delegate to the minter, and revoke
+ * that delegation. Capsule asks for four of these roles and the owner keeps all
+ * sixty-four, which is the correct asymmetry — we are a tenant of their
+ * resolver, not its operator.
+ */
+export const ALL_ROLES =
+  0x1111111111111111111111111111111111111111111111111111111111111111n;
+
+export const verifiableFactoryAbi = parseAbi([
+  "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)",
+  "function deployProxy(address implementation, uint256 salt, bytes data) returns (address)",
+]);
+
+export const resolverInitAbi = parseAbi([
+  "function initialize(address admin, uint256 roleBitmap, bytes[] setters)",
+]);
+
+
 export const universalResolverAbi = parseAbi([
   "error ResolverNotFound(bytes name)",
   "error ResolverNotContract(bytes name, address resolver)",
@@ -73,6 +133,11 @@ export const resolverAdminAbi = parseAbi([
   "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
   "function authorizeTextRoles(bytes toName, string key, address account, bool grant) returns (bool)",
   "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+  // The other write this app sends, from /connect: a parent's admin granting the
+  // minter the root roles it needs to write records under their name. Root rather
+  // than per-name because the capsule names do not exist yet at that point.
+  "function grantRootRoles(uint256 roleBitmap, address account) returns (bool)",
+  "function revokeRootRoles(uint256 roleBitmap, address account) returns (bool)",
 ]);
 
 /**
@@ -85,6 +150,19 @@ export const resolverAdminAbi = parseAbi([
  */
 export const ROLE_SET_TEXT = 1n << 4n;
 export const ROLE_SET_TEXT_ADMIN = ROLE_SET_TEXT << 128n;
+
+/**
+ * `ROLE_REGISTRAR` and its admin, from `RegistryRolesLib`.
+ *
+ * A different role table from the resolver's above, on a different contract,
+ * with the same bit values and entirely different meanings — which is exactly
+ * why both are spelled out here rather than shared. `ROLE_REGISTRAR` is what
+ * `CapsuleMinter` needs on a parent's registry before it can register subnames
+ * there; `ROLE_REGISTRAR_ADMIN` is what lets an account grant it, and is
+ * therefore what the minter treats as proof that somebody controls the parent.
+ */
+export const ROLE_REGISTRAR = 1n << 0n;
+export const ROLE_REGISTRAR_ADMIN = ROLE_REGISTRAR << 128n;
 
 /**
  * `PermissionedResolverLib.resource(node, part)` — the EAC resource id.
@@ -116,34 +194,67 @@ function resourceOf(node: Hex, part: Hex): bigint {
 export const minterAbi = parseAbi([
   "error ZeroAddress()",
   "error InvalidLabel(string label)",
+  "error InvalidName(bytes dnsName)",
   "error MissingResolverRoles()",
+  // The four the multi-parent flow can actually hit. Named here so a revert reaches
+  // the user as a sentence about which setup step is missing, rather than a selector.
+  "error NotParentAdmin(address registry, address account)",
+  "error ParentNotConnected(address registry)",
+  "error ParentNotOpen(address registry, address account)",
+  "error ParentLinkBroken(address registry)",
   // Field order is the ABI. Keep it identical to the struct in CapsuleMinter.sol —
   // viem encodes a tuple positionally, so a reordering here silently writes the
   // Telegram URL into `agent-context`.
   "struct CapsuleConfig { string context; string telegramUrl; string capsuleEndpoint; string model; string runtime; string promptPointer; }",
-  "function mint(string label, address owner, address agent, CapsuleConfig config) returns (uint256 tokenId, bytes32 node)",
-  "function nodeOf(string label) view returns (bytes32)",
-  "function dnsNameOf(string label) view returns (bytes)",
+  // The parent is named by its REGISTRY, not by its name or its resolver. The minter
+  // stores the rest against that address at connect time, so there is no way for this
+  // app to pair a real parent's registry with the wrong resolver — see the contract's
+  // "One minter, many parents" note for why that pairing had to be made unrepresentable.
+  "function mint(address registry, string label, address owner, address agent, CapsuleConfig config) returns (uint256 tokenId, bytes32 node)",
+
+  // --- the connect flow, sent from /connect by the parent's own admin ---
+  "function connectParent(address registry, address resolver, bytes parentDns, bool open)",
+  "function setParentOpen(address registry, bool open)",
+  "function disconnectParent(address registry)",
+
+  // --- what the launch form and /connect read before they let anyone sign ---
+  "function parentOf(address registry) view returns (bool connected, bool open, address resolver, bytes32 node, bytes dnsName)",
+  // One call, five booleans: connected, the two grants, open, and whether THIS account
+  // would get past the check. The form gates every button on it, because the
+  // alternative is finding out which step was skipped from a revert after signing.
+  "function readiness(address registry, address account) view returns (bool connected, bool registrarGranted, bool resolverRolesGranted, bool open, bool callerMayMint)",
+
+  "function nodeOf(address registry, string label) view returns (bytes32)",
+  "function dnsNameOf(address registry, string label) view returns (bytes)",
+  // The contract's own namehash over a DNS wire name, exposed so /connect can show the
+  // node it is about to store and compare it against viem's `namehash` of the same
+  // name. Two independent implementations agreeing is the check; the contract derives
+  // the node from the DNS name precisely so the two can never be configured apart.
+  "function namehash(bytes dnsName) pure returns (bytes32)",
   "function textResourceOf(bytes32 node, string key) pure returns (uint256)",
-  "function isAgentAuthorized(string label, address agent) view returns (bool)",
-  "function checkResolverRoles() view",
-  "function PARENT_NODE() view returns (bytes32)",
-  // The subregistry every capsule label is registered in. Read rather than
-  // configured: it is an immutable set at construction, so a redeploy moves it,
-  // and a second environment variable holding a copy is a second thing to keep
-  // in step with the minter address.
-  "function REGISTRY() view returns (address)",
+  "function isAgentAuthorized(address registry, string label, address agent) view returns (bool)",
+  "function checkResolverRoles(address resolver) view",
+  "function REQUIRED_RESOLVER_ROOT_ROLES() view returns (uint256)",
   "function DURATION() view returns (uint64)",
   "function SCHEMA_URI() view returns (string)",
   // ENSIP-25. Read these rather than rebuilding the key locally: the interoperable
   // address is derived from the deployment's own chain id and address, so it changes
-  // on every redeploy and a hardcoded copy goes stale without failing.
+  // on every redeploy and a hardcoded copy goes stale without failing. It is the
+  // MINTER's address, not the parent's, so it is the same for every capsule this
+  // deployment issues whatever name they sit under.
   "function REGISTRY_INTEROP_ADDRESS() view returns (string)",
   "function registrationKey(uint256 tokenId) view returns (string)",
   "function interopAddressOf(uint256 chainId, address account) pure returns (string)",
   // Carries no record values on purpose: the resolver emits its own event per
   // setText, so an indexer reads the config from there or from the records.
-  "event CapsuleMinted(bytes32 indexed node, address indexed owner, address indexed agent, uint256 tokenId, string label, uint64 expiry)",
+  //
+  // `parentNode` is indexed and `agent` is not — three topics is the ABI limit, and a
+  // dashboard showing one name's fleet filters on the parent every time it loads.
+  // `readFleet` passes it as a topic argument, which is what keeps two names' capsules
+  // from appearing in each other's dashboards.
+  "event CapsuleMinted(bytes32 indexed parentNode, bytes32 indexed node, address indexed owner, address agent, uint256 tokenId, string label, uint64 expiry)",
+  "event ParentConnected(bytes32 indexed parentNode, address indexed registry, address indexed resolver, address by, bool open)",
+  "event ParentDisconnected(bytes32 indexed parentNode, address indexed registry, address by)",
 ]);
 
 /**
@@ -162,6 +273,19 @@ export const minterAbi = parseAbi([
 export const registryAbi = parseAbi([
   "function findOwner(string label) view returns (address owner)",
   "function findTokenId(string label) view returns (uint256 tokenId)",
+  // `ETH_REGISTRY.getSubregistry("berkin")` is how a name becomes a registry address,
+  // which is the only handle on a parent this app ever needs. Zero means the name has
+  // no subregistry yet, and therefore cannot issue subnames to anyone — the first
+  // thing /connect checks, and the one problem it cannot fix for you.
+  "function getSubregistry(string label) view returns (address)",
+  "function getResolver(string label) view returns (address)",
+  // The upward half of the two-way link. `connectParent` verifies both halves on
+  // chain; /connect reads this one so it can say which name a registry belongs to
+  // before asking anybody to sign.
+  "function getParent() view returns (address parent, string label)",
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+  "function grantRootRoles(uint256 roleBitmap, address account) returns (bool)",
+  "function revokeRootRoles(uint256 roleBitmap, address account) returns (bool)",
 ]);
 
 /**

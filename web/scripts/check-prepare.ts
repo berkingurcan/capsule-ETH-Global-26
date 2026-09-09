@@ -75,7 +75,7 @@ async function send(
   const raw = JSON.stringify(payload);
   const digest = keccak256(toHex(raw));
   const timestamp = tamper?.timestamp ?? Math.floor(Date.now() / 1000);
-  const capsuleName = `${String(payload.label).toLowerCase()}.${env.parentName}`;
+  const capsuleName = `${String(payload.label).toLowerCase()}.${env.defaultParentName}`;
 
   const signature =
     tamper?.signature ??
@@ -117,7 +117,7 @@ async function main() {
   // ---- 1. validation, with no network at all -----------------------------
   console.log("validation (pure):");
   const bad = (overrides: Record<string, unknown>, field: string) => {
-    const result = parsePrepareRequest(bodyFor(overrides), env.parentName);
+    const result = parsePrepareRequest(bodyFor(overrides), env.defaultParentName);
     check(
       `rejects ${field}`,
       !result.ok && result.problems.some((p) => p.field === field),
@@ -138,11 +138,11 @@ async function main() {
   bad({ context: "" }, "context");
   bad({ telegramUrl: "http://t.me/x" }, "telegramUrl");
 
-  const good = parsePrepareRequest(bodyFor({ owner: "0x9e0283E37bd2f2c6bEFC29b89CF2d86fe5b5fB71" }), env.parentName);
+  const good = parsePrepareRequest(bodyFor({ owner: "0x9e0283E37bd2f2c6bEFC29b89CF2d86fe5b5fB71" }), env.defaultParentName);
   check("accepts a well-formed request", good.ok);
   check(
     "builds the capsule name from the parent",
-    good.ok && good.capsuleName === `${LABEL}.${env.parentName}`,
+    good.ok && good.capsuleName === `${LABEL}.${env.defaultParentName}`,
     good.ok ? good.capsuleName : "",
   );
 
@@ -214,7 +214,7 @@ async function main() {
         providerKey: "sk-ant-fixture",
       },
       ({ message }) => viaClient.signMessage({ message }),
-      { baseUrl: BASE, parentName: env.parentName },
+      { baseUrl: BASE, parentName: env.defaultParentName },
     );
   } catch (error) {
     clientError = error instanceof PrepareError ? JSON.stringify(error.failure) : String(error);
@@ -241,7 +241,7 @@ async function main() {
         providerKey: "",
       },
       ({ message }) => viaClient.signMessage({ message }),
-      { baseUrl: BASE, parentName: env.parentName },
+      { baseUrl: BASE, parentName: env.defaultParentName },
     );
   } catch (error) {
     typed = error instanceof PrepareError ? error : null;
@@ -263,7 +263,7 @@ async function main() {
   check("the rival gets its own agent address", agentA !== "" && agentB !== "" && agentA !== agentB);
   check("the rival gets its own prompt ref", refA !== refB);
 
-  const capsuleName = `${LABEL}.${env.parentName}`;
+  const capsuleName = `${LABEL}.${env.defaultParentName}`;
   const rows = (await sql`
     select agent_address, slot from capsule_secret where capsule_name = ${capsuleName} order by agent_address, slot
   `) as { agent_address: string; slot: string }[];

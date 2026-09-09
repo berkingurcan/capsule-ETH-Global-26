@@ -35,7 +35,8 @@ import { sepolia } from "viem/chains";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { neon } from "@neondatabase/serverless";
 import { readFileSync } from "node:fs";
-import { minterAbi } from "../lib/capsule/chain";
+import { ETH_REGISTRY, minterAbi, registryAbi } from "../lib/capsule/chain";
+import { encodeParent } from "../lib/capsule/parent";
 import { loadServerEnv } from "../lib/capsule/env";
 import { encodeName } from "../lib/capsule/resolve";
 import { buildMintParams, capsuleMintedFrom, minterCanWrite } from "../lib/capsule/mint";
@@ -85,7 +86,30 @@ async function main() {
   const client = createPublicClient({ chain: sepolia, transport: http(env.rpcUrl, { batch: true }) });
   const minter = env.minterAddress;
 
-  console.log(`minter ${minter} on ${sepolia.name}\n`);
+  // Which parent everything below simulates against: the deployment's default.
+  // `mint()` takes a registry now, so a check that did not resolve one would be
+  // checking nothing — and resolving it here, from the name, is exactly what the
+  // launch form does before it lets anybody sign.
+  const parent = encodeParent(env.defaultParentName);
+  const registry = await client.readContract({
+    address: ETH_REGISTRY,
+    abi: registryAbi,
+    functionName: "getSubregistry",
+    args: [parent.label],
+  });
+  if (registry === zeroAddress) {
+    console.error(`${parent.name} has no subregistry — nothing can mint under it`);
+    process.exit(1);
+  }
+  const [, , storedResolver] = await client.readContract({
+    address: minter,
+    abi: minterAbi,
+    functionName: "parentOf",
+    args: [registry],
+  });
+
+  console.log(`minter ${minter} on ${sepolia.name}`);
+  console.log(`parent ${parent.name} · registry ${registry}\n`);
 
   // --- 1. the struct order, read off the Solidity ---------------------------
   //
@@ -97,7 +121,7 @@ async function main() {
 
   const mintInput = minterAbi.find((item) => item.type === "function" && item.name === "mint");
   const configArg =
-    mintInput !== undefined && "inputs" in mintInput ? mintInput.inputs[3] : undefined;
+    mintInput !== undefined && "inputs" in mintInput ? mintInput.inputs[4] : undefined;
   const abiFields =
     configArg !== undefined && "components" in configArg
       ? (configArg.components as readonly { name?: string }[]).map((c) => c.name ?? "")
@@ -111,15 +135,34 @@ async function main() {
 
   // And that `buildMintParams` fills those same names — a rename in the ABI
   // with no rename here would produce an object viem encodes as empty strings.
-  const params = buildMintParams(fakePrepared("check", zeroAddress, zeroAddress));
+  const params = buildMintParams(registry, fakePrepared("check", zeroAddress, zeroAddress));
   check(
     "buildMintParams supplies every struct field",
-    abiFields.every((name) => name in params[3]) && Object.keys(params[3]).length === abiFields.length,
-    Object.keys(params[3]).join(" "),
+    abiFields.every((name) => name in params[4]) && Object.keys(params[4]).length === abiFields.length,
+    Object.keys(params[4]).join(" "),
   );
 
-  // --- 2. the minter can still write ---------------------------------------
-  check("checkResolverRoles() passes", await minterCanWrite(client, minter), "minter holds root roles on the resolver");
+  // --- 2. the minter can still mint under this parent ----------------------
+  //
+  // `checkResolverRoles()` alone no longer answers this. It asks about ONE
+  // resolver, and which resolver depends on the parent — so the question is now
+  // "is this parent wired", and `readiness()` answers all of it in one call.
+  const [connected, registrarGranted, resolverRolesGranted, open] = await client.readContract({
+    address: minter,
+    abi: minterAbi,
+    functionName: "readiness",
+    // Any account will do: the first four booleans do not depend on it, and the
+    // fifth is reported for the same throwaway address the simulations mint from.
+    args: [registry, "0x000000000000000000000000000000000000dEaD"],
+  });
+  check(`${parent.name} is connected to the minter`, connected, registry);
+  check("  the minter holds ROLE_REGISTRAR", registrarGranted);
+  check(
+    "  checkResolverRoles() passes",
+    resolverRolesGranted && (await minterCanWrite(client, minter, storedResolver)),
+    `resolver ${storedResolver}`,
+  );
+  check("  the parent is open to anyone", open, open ? "permissionless" : "admins only");
 
   // --- 3. a free label simulates -------------------------------------------
   //
@@ -135,7 +178,7 @@ async function main() {
       address: minter,
       abi: minterAbi,
       functionName: "mint",
-      args: buildMintParams(fakePrepared(label, owner, agent)),
+      args: buildMintParams(registry, fakePrepared(label, owner, agent)),
       account: owner,
     });
     simulated = { tokenId: result[0], node: result[1] };
@@ -147,18 +190,18 @@ async function main() {
   // The node the contract computes has to be the node this app computes, or the
   // fleet reads a different name than the one that was minted.
   if (simulated !== null) {
-    const local = encodeName(`${label}.${env.parentName}`).node;
+    const local = encodeName(`${label}.${env.defaultParentName}`).node;
     check("returned node matches encodeName()", simulated.node === local, `${simulated.node} vs ${local}`);
   }
 
   // --- 4. the reverts the UI names -----------------------------------------
-  async function expectRevert(name: string, args: Parameters<typeof buildMintParams>[0], expected: string) {
+  async function expectRevert(name: string, args: Parameters<typeof buildMintParams>[1], expected: string) {
     try {
       await client.simulateContract({
         address: minter,
         abi: minterAbi,
         functionName: "mint",
-        args: buildMintParams(args),
+        args: buildMintParams(registry, args),
         account: owner,
       });
       check(name, false, "did not revert");
@@ -201,7 +244,7 @@ async function main() {
     const parsed = capsuleMintedFrom([first] as never, minter);
     check("capsuleMintedFrom decodes a real log", parsed !== null);
     if (parsed !== null) {
-      const local = encodeName(`${parsed.label}.${env.parentName}`).node;
+      const local = encodeName(`${parsed.label}.${env.defaultParentName}`).node;
       check("  its node matches the label it carries", parsed.node === local, `${parsed.label} → ${parsed.node}`);
       check("  it carries an owner and an agent", parsed.owner !== zeroAddress && parsed.agent !== zeroAddress, `${parsed.owner} / ${parsed.agent}`);
       check("  its tokenId is non-zero", parsed.tokenId > 0n, parsed.tokenId.toString());
@@ -220,7 +263,7 @@ async function main() {
         address: minter,
         abi: minterAbi,
         functionName: "mint",
-        args: buildMintParams(fakePrepared(taken, owner, agent)),
+        args: buildMintParams(registry, fakePrepared(taken, owner, agent)),
         account: owner,
       });
       check(`re-minting "${taken}" reverts`, false, "it did not");
@@ -264,7 +307,7 @@ async function main() {
           providerKey: "sk-check-not-a-real-key",
         },
         (args) => seamOwner.signMessage({ message: args.message }),
-        { baseUrl: BASE, parentName: env.parentName },
+        { baseUrl: BASE, parentName: env.defaultParentName },
       );
       check("\nprepare accepts a request the launch form would send", true, `agent ${prepared.agent}`);
     } catch (error) {
@@ -299,7 +342,7 @@ async function main() {
           address: minter,
           abi: minterAbi,
           functionName: "mint",
-          args: buildMintParams(prepared),
+          args: buildMintParams(registry, prepared),
           account: seamOwner.address,
         });
         const local = encodeName(prepared.capsuleName).node;

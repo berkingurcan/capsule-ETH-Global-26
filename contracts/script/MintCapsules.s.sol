@@ -3,7 +3,7 @@ pragma solidity ^0.8.28;
 
 import {Script, console} from "forge-std/Script.sol";
 import {CapsuleMinter} from "../src/CapsuleMinter.sol";
-import {IPermissionedRegistry} from "../src/interfaces/IENSv2.sol";
+import {IPermissionedRegistry, IPermissionedResolver} from "../src/interfaces/IENSv2.sol";
 
 /// @notice Mints the demo fleet onto a freshly deployed `CapsuleMinter`.
 ///
@@ -29,51 +29,71 @@ contract MintCapsules is Script {
         string promptRef;
     }
 
-    function run() external {
-        address registry = vm.envAddress("SUBREGISTRY");
-        address minterAddress = vm.envAddress("MINTER");
-        address owner = vm.envAddress("ADDRESS");
-        address agent = vm.envAddress("AGENT_ADDRESS");
-        string memory endpoint = vm.envString("CAPSULE_ENDPOINT");
-        string memory model = vm.envOr("CAPSULE_MODEL", string("claude-opus-5"));
-        string memory runtime = vm.envOr("CAPSULE_RUNTIME", string("openclaw"));
+    /// @dev Everything the loop needs that is not per-capsule. A struct rather than eight
+    ///      locals in `run()`, because `mint()` now takes a registry as well and the frame
+    ///      no longer fits in the sixteen stack slots `solc` will reach for.
+    struct Settings {
+        CapsuleMinter minter;
+        IPermissionedRegistry registry;
+        address owner;
+        address agent;
+        string endpoint;
+        string model;
+        string runtime;
+    }
 
-        CapsuleMinter minter = CapsuleMinter(minterAddress);
+    function run() external {
+        Settings memory s = Settings({
+            minter: CapsuleMinter(vm.envAddress("MINTER")),
+            registry: IPermissionedRegistry(vm.envAddress("SUBREGISTRY")),
+            owner: vm.envAddress("ADDRESS"),
+            agent: vm.envAddress("AGENT_ADDRESS"),
+            endpoint: vm.envString("CAPSULE_ENDPOINT"),
+            model: vm.envOr("CAPSULE_MODEL", string("claude-opus-5")),
+            runtime: vm.envOr("CAPSULE_RUNTIME", string("openclaw"))
+        });
+
+        // Fails here rather than inside the first mint, after gas has been spent. The
+        // resolver comes from the minter's own record of this parent rather than from the
+        // environment: `ConnectParent.s.sol` stored it, and a second copy in a `.env`
+        // would be a second thing to keep in step.
+        (bool connected,, IPermissionedResolver resolver,,) = s.minter.parentOf(s.registry);
+        require(connected, "run ConnectParent.s.sol for this registry first");
+        s.minter.checkResolverRoles(resolver);
+
         Capsule[4] memory fleet = _fleet();
 
-        // Fails here rather than inside the first mint, after gas has been spent.
-        minter.checkResolverRoles();
-
         vm.startBroadcast();
-
         for (uint256 i = 0; i < fleet.length; i++) {
-            Capsule memory c = fleet[i];
+            _mintOne(s, fleet[i]);
+        }
+        vm.stopBroadcast();
+    }
 
-            uint256 existing = IPermissionedRegistry(registry).findTokenId(c.label);
-            if (IPermissionedRegistry(registry).findOwner(c.label) != address(0)) {
-                console.log("unregister:", c.label, existing);
-                IPermissionedRegistry(registry).unregister(existing);
-            }
-
-            (uint256 tokenId,) = minter.mint(
-                c.label,
-                owner,
-                agent,
-                CapsuleMinter.CapsuleConfig({
-                    context: c.context,
-                    telegramUrl: c.telegramUrl,
-                    capsuleEndpoint: endpoint,
-                    model: model,
-                    runtime: runtime,
-                    promptPointer: c.promptRef
-                })
-            );
-
-            console.log("minted:", c.label, tokenId);
-            console.log("  ensip-25 key:", minter.registrationKey(tokenId));
+    function _mintOne(Settings memory s, Capsule memory c) internal {
+        uint256 existing = s.registry.findTokenId(c.label);
+        if (s.registry.findOwner(c.label) != address(0)) {
+            console.log("unregister:", c.label, existing);
+            s.registry.unregister(existing);
         }
 
-        vm.stopBroadcast();
+        (uint256 tokenId,) = s.minter.mint(
+            s.registry,
+            c.label,
+            s.owner,
+            s.agent,
+            CapsuleMinter.CapsuleConfig({
+                context: c.context,
+                telegramUrl: c.telegramUrl,
+                capsuleEndpoint: s.endpoint,
+                model: s.model,
+                runtime: s.runtime,
+                promptPointer: c.promptRef
+            })
+        );
+
+        console.log("minted:", c.label, tokenId);
+        console.log("  ensip-25 key:", s.minter.registrationKey(tokenId));
     }
 
     /// @dev `agent-context` is what a generic ENS client shows a human who resolves the

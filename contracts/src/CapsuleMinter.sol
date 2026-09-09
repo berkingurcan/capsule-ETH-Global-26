@@ -30,6 +30,23 @@ import {IPermissionedRegistry, IPermissionedResolver} from "./interfaces/IENSv2.
 /// @dev This contract is also the ENSIP-25 *registry*: it issues the `tokenId` that
 ///      `agent-registration[<registry>][<agentId>]` names, and it writes that record
 ///      itself at mint. See `registrationKey`.
+///
+/// ## One minter, many parents
+///
+/// This contract holds no parent name of its own. Any ENS name whose owner connects it
+/// can issue capsules: `dev.berkin.eth` and `trader.pumpagent.eth` are minted by this
+/// same deployment, under registries it has never been redeployed for.
+///
+/// The parent name is NOT an argument to `mint()`. It is *registered once* by the parent's
+/// own admin, through `connectParent`, and `mint()` then names only the registry. That
+/// ordering is the whole security model, and the reason for it is worth stating plainly:
+///
+/// A `mint(registry, resolver, parentDns, ...)` that took all three per call looks
+/// equivalent and is not. Nothing on chain ties a registry to a resolver, so a caller
+/// could pass a real parent's registry alongside a resolver they control, satisfy every
+/// permission check against their own resolver, and register a label in somebody else's
+/// name. Storing the triple once, keyed by registry, behind an admin check makes that
+/// combination unrepresentable rather than merely discouraged.
 contract CapsuleMinter {
     ////////////////////////////////////////////////////////////////////////
     // Roles
@@ -42,10 +59,20 @@ contract CapsuleMinter {
     uint256 internal constant ROLE_SET_TEXT = 1 << 4;
     uint256 internal constant ROLE_SET_TEXT_ADMIN = ROLE_SET_TEXT << 128;
 
-    /// @notice Root roles this contract must hold on the resolver before `mint()` works.
+    /// @dev From `RegistryRolesLib` — the REGISTRY's role table, a different set of
+    ///      meanings from the resolver's. `ROLE_REGISTRAR` is what this contract needs in
+    ///      order to `register`; `ROLE_REGISTRAR_ADMIN` is what lets an account *grant*
+    ///      it, and is therefore held by exactly the accounts that could have connected
+    ///      this minter in the first place. That makes it the right proof of control over
+    ///      a parent: no separate owner table, no signature scheme, no allowlist.
+    uint256 internal constant ROLE_REGISTRAR = 1 << 0;
+    uint256 internal constant ROLE_REGISTRAR_ADMIN = ROLE_REGISTRAR << 128;
+
+    /// @notice Root roles this contract must hold on a parent's resolver before `mint()`
+    ///         works for that parent.
     /// @dev The non-admin halves let it write records; the admin halves let it delegate.
     ///      Root roles apply to every name, which is required because the names do not
-    ///      exist yet at deploy time.
+    ///      exist yet at connect time.
     uint256 public constant REQUIRED_RESOLVER_ROOT_ROLES =
         ROLE_SET_ADDR | ROLE_SET_ADDR_ADMIN | ROLE_SET_TEXT | ROLE_SET_TEXT_ADMIN;
 
@@ -114,19 +141,13 @@ contract CapsuleMinter {
     // Immutables
     ////////////////////////////////////////////////////////////////////////
 
-    IPermissionedRegistry public immutable REGISTRY;
-    IPermissionedResolver public immutable RESOLVER;
-
-    /// @dev Namehash of the parent, e.g. `capsulefleet.eth`.
-    bytes32 public immutable PARENT_NODE;
-
-    /// @dev Registration length. Must not outlive the parent name.
+    /// @dev Registration length. Must not outlive the parent name — which this contract
+    ///      cannot check, because a parent's own expiry lives in a registry one level up
+    ///      that it has no handle on. A parent connecting a name with less than this left
+    ///      on it issues capsules that outlive their parent on paper and resolve to
+    ///      nothing in practice; that is the parent's call to make, and `connectParent`
+    ///      does not second-guess it.
     uint64 public immutable DURATION;
-
-    /// @dev Parent in DNS wire format including the root byte, e.g.
-    ///      `0x0c63617073756c65666c6565740365746800` for `capsulefleet.eth`.
-    ///      Dynamic, so it cannot be `immutable`.
-    bytes public PARENT_DNS;
 
     /// @notice The ENSIP-27 `schema` value written on every name — the URI of the JSON
     ///         Schema describing the four keys no ENSIP defines.
@@ -139,7 +160,43 @@ contract CapsuleMinter {
     /// @dev Derived once at construction from `block.chainid` and `address(this)`, so it
     ///      is correct on every chain and after every redeploy, and never hardcoded
     ///      anywhere. Building it per mint would be pure waste: it cannot change.
+    ///
+    ///      Note this is the *minter*, not the parent. Every capsule this deployment
+    ///      issues carries the same ENSIP-25 registry id whatever name it sits under,
+    ///      which is the correct reading of ENSIP-25: the registry is whoever issued the
+    ///      agent id, and that is this contract for all of them.
     string public REGISTRY_INTEROP_ADDRESS;
+
+    ////////////////////////////////////////////////////////////////////////
+    // Parents
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice A name that has connected itself to this minter.
+    /// @dev Keyed by the parent's own subregistry, which is a stable one-to-one handle on
+    ///      the name: `PermissionedRegistry.getParent()` binds a registry to exactly one
+    ///      label, and `connectParent` verifies the link runs both ways before storing
+    ///      anything.
+    struct Parent {
+        /// @dev The `PermissionedResolver` capsules under this name are registered with.
+        ///      Supplied by the parent's admin rather than read from the registry — see
+        ///      the note on `IPermissionedRegistry.getResolver`.
+        IPermissionedResolver resolver;
+        /// @dev Namehash of the parent name, derived from `dnsName` at connect time.
+        bytes32 node;
+        /// @dev When true, anybody may mint a capsule here. When false, only accounts
+        ///      holding `ROLE_REGISTRAR_ADMIN` on the registry may.
+        bool open;
+        /// @dev Distinguishes "connected, closed" from "never connected". Both refuse a
+        ///      stranger's mint; only the first refuses the parent's own.
+        bool connected;
+        /// @dev The parent in DNS wire format including the root byte, e.g.
+        ///      `0x0c63617073756c65666c6565740365746800` for `capsulefleet.eth`.
+        bytes dnsName;
+    }
+
+    /// @dev registry => its configuration. Read through `parentOf`, which is the ABI the
+    ///      frontend uses; the public getter on a struct holding `bytes` is awkward.
+    mapping(address => Parent) internal _parents;
 
     ////////////////////////////////////////////////////////////////////////
     // Types
@@ -167,38 +224,179 @@ contract CapsuleMinter {
     ///      here would pay for the same data twice — and `mint()` already writes nine
     ///      records, which is where this phase's gas goes. An indexer wanting the config
     ///      reads the resolver's log or the records themselves.
+    ///
+    ///      `parentNode` is indexed and `agent` is not, which is a deliberate swap from
+    ///      the single-parent version: three topics is the ABI limit, and a dashboard
+    ///      showing one name's fleet filters on the parent every time it loads, whereas
+    ///      nothing has ever looked a capsule up by its agent address.
+    ///
+    ///      The parent's registry and resolver are deliberately NOT here, though a
+    ///      multi-parent indexer plainly needs both. Neither is new information: the
+    ///      registry is `getSubregistry(<parent label>)` one level up, and the resolver is
+    ///      whatever `UniversalResolver` walks to — which is how the runner and the
+    ///      dashboard already read every record they read. Putting a second copy in the
+    ///      log would add two words of gas per mint to publish a value that can go stale
+    ///      against the chain it was copied from.
     event CapsuleMinted(
+        bytes32 indexed parentNode,
         bytes32 indexed node,
         address indexed owner,
-        address indexed agent,
+        address agent,
         uint256 tokenId,
         string label,
         uint64 expiry
     );
 
+    /// @notice Emitted when a name connects to this minter, and on every reconfiguration.
+    event ParentConnected(
+        bytes32 indexed parentNode,
+        address indexed registry,
+        address indexed resolver,
+        address by,
+        bool open
+    );
+
+    /// @notice Emitted when a parent withdraws. Capsules already minted are untouched.
+    event ParentDisconnected(bytes32 indexed parentNode, address indexed registry, address by);
+
     error ZeroAddress();
     error InvalidLabel(string label);
+    error InvalidName(bytes dnsName);
     error MissingResolverRoles();
+    /// @dev The caller does not hold `ROLE_REGISTRAR_ADMIN` on the registry.
+    error NotParentAdmin(address registry, address account);
+    /// @dev No `connectParent` has ever succeeded for this registry.
+    error ParentNotConnected(address registry);
+    /// @dev The parent is connected but closed, and the caller is not its admin.
+    error ParentNotOpen(address registry, address account);
+    /// @dev The registry is not wired as the subregistry of the name it claims, or the
+    ///      name supplied does not carry the label the registry says it is.
+    error ParentLinkBroken(address registry);
 
     ////////////////////////////////////////////////////////////////////////
     // Construction
     ////////////////////////////////////////////////////////////////////////
 
-    constructor(
-        IPermissionedRegistry registry,
-        IPermissionedResolver resolver,
-        bytes32 parentNode,
-        bytes memory parentDns,
-        uint64 duration,
-        string memory schemaUri
-    ) {
-        REGISTRY = registry;
-        RESOLVER = resolver;
-        PARENT_NODE = parentNode;
-        PARENT_DNS = parentDns;
+    constructor(uint64 duration, string memory schemaUri) {
         DURATION = duration;
         SCHEMA_URI = schemaUri;
         REGISTRY_INTEROP_ADDRESS = interopAddressOf(block.chainid, address(this));
+    }
+
+    ////////////////////////////////////////////////////////////////////////
+    // Connecting a parent
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice Register a name with this minter so capsules can be issued under it.
+    /// @param registry The name's own `PermissionedRegistry` — the subregistry that will
+    ///        hold the capsule labels.
+    /// @param resolver The `PermissionedResolver` capsule records are written to. This is
+    ///        supplied rather than read off the registry on purpose; see
+    ///        `IPermissionedRegistry.getResolver`.
+    /// @param parentDns The parent name in DNS wire format, including the trailing root
+    ///        byte. The namehash is derived from it rather than accepted alongside it, so
+    ///        the two can never disagree — a mismatch would write records to one node and
+    ///        grant permissions on another, and neither call would revert.
+    /// @param open Whether anybody may mint here, or only this registry's admins.
+    ///
+    /// @dev Call this *after* granting the minter its roles, and check `readiness` to see
+    ///      what is still missing. Connecting does not grant anything: this contract
+    ///      cannot give itself `ROLE_REGISTRAR` on your registry, which is the point.
+    ///
+    ///      Re-calling it is how a parent changes its resolver or flips `open`.
+    function connectParent(
+        IPermissionedRegistry registry,
+        IPermissionedResolver resolver,
+        bytes calldata parentDns,
+        bool open
+    ) external {
+        if (address(registry) == address(0) || address(resolver) == address(0)) revert ZeroAddress();
+        _requireParentAdmin(registry);
+
+        bytes32 node = _verifyParentLink(registry, parentDns);
+
+        Parent storage parent = _parents[address(registry)];
+        parent.resolver = resolver;
+        parent.node = node;
+        parent.open = open;
+        parent.connected = true;
+        parent.dnsName = parentDns;
+
+        emit ParentConnected(node, address(registry), address(resolver), msg.sender, open);
+    }
+
+    /// @notice Flip whether strangers may mint under an already-connected name.
+    /// @dev Separate from `connectParent` because it is the one setting an owner is
+    ///      likely to change twice in a demo, and re-sending the DNS name to change a
+    ///      boolean invites sending a different one by accident.
+    function setParentOpen(IPermissionedRegistry registry, bool open) external {
+        Parent storage parent = _requireConnected(registry);
+        _requireParentAdmin(registry);
+        parent.open = open;
+        emit ParentConnected(parent.node, address(registry), address(parent.resolver), msg.sender, open);
+    }
+
+    /// @notice Withdraw a name from this minter.
+    /// @dev Cosmetic on its own — the roles are what actually authorise minting, and
+    ///      revoking `ROLE_REGISTRAR` on your registry is the real disconnection. This
+    ///      exists so the intent is on chain and the frontend stops offering the name.
+    ///      Capsules already minted keep working: their records, their owner's roles and
+    ///      their agent's one key all live in the resolver, not here.
+    function disconnectParent(IPermissionedRegistry registry) external {
+        Parent storage parent = _requireConnected(registry);
+        _requireParentAdmin(registry);
+        bytes32 node = parent.node;
+        delete _parents[address(registry)];
+        emit ParentDisconnected(node, address(registry), msg.sender);
+    }
+
+    /// @dev `ROLE_REGISTRAR_ADMIN` at the registry's root resource. Root roles are OR-ed
+    ///      into every resource by `EnhancedAccessControl`, so a registry's deployer —
+    ///      who necessarily holds this, or they could not have granted the minter
+    ///      `ROLE_REGISTRAR` — passes, and nobody else does.
+    function _requireParentAdmin(IPermissionedRegistry registry) internal view {
+        if (!registry.hasRoles(0, ROLE_REGISTRAR_ADMIN, msg.sender)) {
+            revert NotParentAdmin(address(registry), msg.sender);
+        }
+    }
+
+    function _requireConnected(IPermissionedRegistry registry) internal view returns (Parent storage) {
+        Parent storage parent = _parents[address(registry)];
+        if (!parent.connected) revert ParentNotConnected(address(registry));
+        return parent;
+    }
+
+    /// @dev Proves `registry` really is the subregistry of the name `parentDns` spells,
+    ///      and returns that name's namehash.
+    ///
+    ///      Both directions are checked, because either alone is forgeable. A contract can
+    ///      return anything at all from `getParent()`, so the upward claim proves nothing
+    ///      by itself; the downward `getSubregistry` answer comes from the registry one
+    ///      level up, which the caller does not control. Requiring them to agree means the
+    ///      only way to pass is to actually be wired in — the same two-way link NOTES.md
+    ///      records as gotcha 1, checked here instead of discovered later.
+    function _verifyParentLink(IPermissionedRegistry registry, bytes calldata parentDns)
+        internal
+        view
+        returns (bytes32 node)
+    {
+        (address grandparent, string memory childLabel) = registry.getParent();
+        if (grandparent == address(0)) revert ParentLinkBroken(address(registry));
+        if (IPermissionedRegistry(grandparent).getSubregistry(childLabel) != address(registry)) {
+            revert ParentLinkBroken(address(registry));
+        }
+
+        // The name must lead with the label the registry answers to, or the records would
+        // land on a node that has nothing to do with the registry the labels are minted in.
+        bytes memory dns = parentDns;
+        if (dns.length == 0) revert InvalidName(parentDns);
+        uint256 firstLength = uint8(dns[0]);
+        if (firstLength == 0 || 1 + firstLength > dns.length) revert InvalidName(parentDns);
+        if (_labelHashAt(dns, 1, firstLength) != keccak256(bytes(childLabel))) {
+            revert ParentLinkBroken(address(registry));
+        }
+
+        node = _namehash(dns, 0);
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -206,52 +404,90 @@ contract CapsuleMinter {
     ////////////////////////////////////////////////////////////////////////
 
     /// @notice Mint `label.<parent>` as an agent capsule.
+    /// @param registry The connected parent's subregistry — the handle on which name this
+    ///        capsule goes under. Everything else about the parent is stored, not passed.
     /// @param label The label only, e.g. "trader".
     /// @param owner Receives the name and full control of its resolver records.
     /// @param agent The agent's own EOA. Gets `agent-heartbeat` write access and nothing else.
-    function mint(string calldata label, address owner, address agent, CapsuleConfig calldata config)
-        external
-        returns (uint256 tokenId, bytes32 node)
-    {
+    function mint(
+        IPermissionedRegistry registry,
+        string calldata label,
+        address owner,
+        address agent,
+        CapsuleConfig calldata config
+    ) external returns (uint256 tokenId, bytes32 node) {
         if (owner == address(0) || agent == address(0)) revert ZeroAddress();
 
-        bytes memory dnsName = dnsNameOf(label);
-        node = nodeOf(label);
+        Parent storage parent = _requireConnected(registry);
+        if (!parent.open && !registry.hasRoles(0, ROLE_REGISTRAR_ADMIN, msg.sender)) {
+            revert ParentNotOpen(address(registry), msg.sender);
+        }
+
+        node = keccak256(abi.encodePacked(parent.node, keccak256(bytes(label))));
+
+        // Split across two internal calls, and it has to be. Registering, granting and
+        // writing nine records in one frame needs more than the sixteen reachable stack
+        // slots the EVM gives a function, and `solc` refuses the whole contract rather
+        // than spilling — so the split is a compiler constraint, not a style choice, and
+        // collapsing it back into one body will not build.
+        tokenId = _registerAndDelegate(parent, registry, label, owner, agent, node);
+        _writeRecords(parent.resolver, node, tokenId, config);
+    }
+
+    /// @dev Steps 1, 2 and 4: the name exists, the owner controls it, the agent may write
+    ///      exactly one key. Ordered so a failure cannot leave a name nobody controls.
+    function _registerAndDelegate(
+        Parent storage parent,
+        IPermissionedRegistry registry,
+        string calldata label,
+        address owner,
+        address agent,
+        bytes32 node
+    ) internal returns (uint256 tokenId) {
+        IPermissionedResolver resolver = parent.resolver;
+        bytes memory dnsName = _childDnsName(parent.dnsName, label);
         uint64 expiry = uint64(block.timestamp) + DURATION;
 
-        // 1. Register the name. `address(0)` subregistry: agents do not issue child names.
-        tokenId = REGISTRY.register(label, owner, address(0), address(RESOLVER), ALL_ROLES, expiry);
+        // `address(0)` subregistry: agents do not issue child names.
+        tokenId = registry.register(label, owner, address(0), address(resolver), ALL_ROLES, expiry);
 
-        // 2. Hand the owner control of this name's records, including the kill switch.
-        //    Done before the writes below so a failure here cannot leave a half-owned name.
-        RESOLVER.authorizeNameRoles(dnsName, OWNER_NAME_ROLES, owner, true);
+        // Hand the owner control of this name's records, including the kill switch. Done
+        // before the record writes so a failure there cannot leave a half-owned name.
+        resolver.authorizeNameRoles(dnsName, OWNER_NAME_ROLES, owner, true);
 
-        // 3. Write the records. Uses this contract's own root ROLE_SET_TEXT / ROLE_SET_ADDR.
-        RESOLVER.setAddr(node, agent);
+        // The agent may write exactly one key.
+        resolver.authorizeTextRoles(dnsName, KEY_HEARTBEAT, agent, true);
 
+        resolver.setAddr(node, agent);
+
+        emit CapsuleMinted(parent.node, node, owner, agent, tokenId, label, expiry);
+    }
+
+    /// @dev Step 3. Uses this contract's own root `ROLE_SET_TEXT` on the parent's resolver.
+    function _writeRecords(
+        IPermissionedResolver resolver,
+        bytes32 node,
+        uint256 tokenId,
+        CapsuleConfig calldata config
+    ) internal {
         // ENSIP-27: what kind of node this is, and where to find the schema for the keys
         // no ENSIP defines. `class` must equal the schema's `title`.
-        RESOLVER.setText(node, KEY_CLASS, CLASS_VALUE);
-        RESOLVER.setText(node, KEY_SCHEMA, SCHEMA_URI);
+        resolver.setText(node, KEY_CLASS, CLASS_VALUE);
+        resolver.setText(node, KEY_SCHEMA, SCHEMA_URI);
 
         // ENSIP-26: what a generic ENS client shows a human, and where to reach the agent.
-        RESOLVER.setText(node, KEY_CONTEXT, config.context);
-        RESOLVER.setText(node, KEY_ENDPOINT_WEB, config.telegramUrl);
-        RESOLVER.setText(node, KEY_ENDPOINT_CAPSULE, config.capsuleEndpoint);
+        resolver.setText(node, KEY_CONTEXT, config.context);
+        resolver.setText(node, KEY_ENDPOINT_WEB, config.telegramUrl);
+        resolver.setText(node, KEY_ENDPOINT_CAPSULE, config.capsuleEndpoint);
 
         // Ours. `agent-heartbeat` is NOT written here — an unwritten heartbeat is what
         // "this agent has never run" looks like, and the agent writes the first one.
-        RESOLVER.setText(node, KEY_MODEL, config.model);
-        RESOLVER.setText(node, KEY_RUNTIME, config.runtime);
-        RESOLVER.setText(node, KEY_PROMPT, config.promptPointer);
+        resolver.setText(node, KEY_MODEL, config.model);
+        resolver.setText(node, KEY_RUNTIME, config.runtime);
+        resolver.setText(node, KEY_PROMPT, config.promptPointer);
 
         // ENSIP-25: this name really is the agent holding `tokenId` in this registry.
-        RESOLVER.setText(node, registrationKey(tokenId), REGISTRATION_VALUE);
-
-        // 4. The agent may write exactly one key.
-        RESOLVER.authorizeTextRoles(dnsName, KEY_HEARTBEAT, agent, true);
-
-        emit CapsuleMinted(node, owner, agent, tokenId, label, expiry);
+        resolver.setText(node, registrationKey(tokenId), REGISTRATION_VALUE);
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -341,16 +577,70 @@ contract CapsuleMinter {
     // Both are exposed so the frontend can derive them without a second RPC round trip.
 
     /// @notice The namehash of `label.<parent>`.
-    function nodeOf(string memory label) public view returns (bytes32) {
-        return keccak256(abi.encodePacked(PARENT_NODE, keccak256(bytes(label))));
+    function nodeOf(IPermissionedRegistry registry, string memory label) public view returns (bytes32) {
+        return keccak256(abi.encodePacked(_requireConnected(registry).node, keccak256(bytes(label))));
     }
 
     /// @notice `label.<parent>` in DNS wire format, including the trailing root byte.
-    function dnsNameOf(string memory label) public view returns (bytes memory) {
+    function dnsNameOf(IPermissionedRegistry registry, string memory label)
+        public
+        view
+        returns (bytes memory)
+    {
+        return _childDnsName(_requireConnected(registry).dnsName, label);
+    }
+
+    function _childDnsName(bytes memory parentDns, string memory label)
+        internal
+        pure
+        returns (bytes memory)
+    {
         bytes memory l = bytes(label);
         // DNS labels carry a single length byte, so 63 characters is a hard protocol limit.
         if (l.length == 0 || l.length > 63) revert InvalidLabel(label);
-        return abi.encodePacked(uint8(l.length), l, PARENT_DNS);
+        return abi.encodePacked(uint8(l.length), l, parentDns);
+    }
+
+    /// @notice The namehash of a DNS wire-format name.
+    /// @dev Mirrors `NameCoder.namehash`, which is what `PermissionedResolver` runs on
+    ///      every `authorizeTextRoles` / `authorizeNameRoles` call. Deriving the node here
+    ///      instead of accepting it as an argument is what makes it impossible for the
+    ///      node we write records to and the name we grant permissions on to be different
+    ///      names — a divergence that reverts nowhere and shows up as an agent whose
+    ///      heartbeat is silently unauthorized.
+    ///
+    ///      Recursive, with depth bounded by the label count of a name someone chose to
+    ///      type. The terminal check requires the root byte to be the *last* byte, so
+    ///      trailing junk is rejected rather than ignored.
+    function namehash(bytes memory dnsName) public pure returns (bytes32) {
+        return _namehash(dnsName, 0);
+    }
+
+    function _namehash(bytes memory dns, uint256 offset) internal pure returns (bytes32) {
+        if (offset >= dns.length) revert InvalidName(dns);
+        uint256 length = uint8(dns[offset]);
+        if (length == 0) {
+            if (offset + 1 != dns.length) revert InvalidName(dns);
+            return bytes32(0);
+        }
+        if (offset + 1 + length > dns.length) revert InvalidName(dns);
+        return keccak256(
+            abi.encodePacked(
+                _namehash(dns, offset + 1 + length), _labelHashAt(dns, offset + 1, length)
+            )
+        );
+    }
+
+    /// @dev `keccak256(dns[start:start+length])` without copying the slice into a new
+    ///      `bytes`. Bounds are checked by every caller before it gets here.
+    function _labelHashAt(bytes memory dns, uint256 start, uint256 length)
+        internal
+        pure
+        returns (bytes32 hash)
+    {
+        assembly {
+            hash := keccak256(add(add(dns, 0x20), start), length)
+        }
     }
 
     /// @notice The EAC resource id guarding one text key on one name.
@@ -362,16 +652,81 @@ contract CapsuleMinter {
         return uint256(keccak256(abi.encode(node, keccak256(bytes(key)))));
     }
 
+    ////////////////////////////////////////////////////////////////////////
+    // Views the frontend runs before it lets anyone sign anything
+    ////////////////////////////////////////////////////////////////////////
+
+    /// @notice A parent's stored configuration. `connected` is false for a name that has
+    ///         never called `connectParent`, and every other field is then meaningless.
+    function parentOf(IPermissionedRegistry registry)
+        external
+        view
+        returns (
+            bool connected,
+            bool open,
+            IPermissionedResolver resolver,
+            bytes32 node,
+            bytes memory dnsName
+        )
+    {
+        Parent storage parent = _parents[address(registry)];
+        return (parent.connected, parent.open, parent.resolver, parent.node, parent.dnsName);
+    }
+
+    /// @notice Everything that has to be true before `mint()` will work for `account`.
+    ///
+    /// @dev One call, five booleans, because the alternative is a launch form that finds
+    ///      out which step was skipped from a revert selector after the user has signed.
+    ///      `connectParent` deliberately does not require the roles to be in place, so
+    ///      "connected but not yet granted" is a real and expected state, and this is what
+    ///      tells the two apart.
+    ///
+    /// @return connected `connectParent` has been called for this registry.
+    /// @return registrarGranted The minter holds `ROLE_REGISTRAR` on the registry.
+    /// @return resolverRolesGranted The minter holds all four root roles on the resolver.
+    /// @return open Anybody may mint here.
+    /// @return callerMayMint `account` would get past the authorization check today.
+    function readiness(IPermissionedRegistry registry, address account)
+        external
+        view
+        returns (
+            bool connected,
+            bool registrarGranted,
+            bool resolverRolesGranted,
+            bool open,
+            bool callerMayMint
+        )
+    {
+        Parent storage parent = _parents[address(registry)];
+        connected = parent.connected;
+        open = parent.open;
+
+        registrarGranted = registry.hasRoles(0, ROLE_REGISTRAR, address(this));
+        resolverRolesGranted = connected
+            && parent.resolver.hasRoles(0, REQUIRED_RESOLVER_ROOT_ROLES, address(this));
+
+        bool isAdmin = registry.hasRoles(0, ROLE_REGISTRAR_ADMIN, account);
+        callerMayMint = connected && registrarGranted && resolverRolesGranted && (open || isAdmin);
+    }
+
     /// @notice Whether `agent` can currently write `agent-heartbeat` on `label`.
     /// @dev The frontend's live "is this capsule running?" check.
-    function isAgentAuthorized(string calldata label, address agent) external view returns (bool) {
-        return RESOLVER.hasRoles(textResourceOf(nodeOf(label), KEY_HEARTBEAT), ROLE_SET_TEXT, agent);
+    function isAgentAuthorized(IPermissionedRegistry registry, string calldata label, address agent)
+        external
+        view
+        returns (bool)
+    {
+        Parent storage parent = _requireConnected(registry);
+        bytes32 node = keccak256(abi.encodePacked(parent.node, keccak256(bytes(label))));
+        return parent.resolver.hasRoles(textResourceOf(node, KEY_HEARTBEAT), ROLE_SET_TEXT, agent);
     }
 
     /// @notice Reverts unless this contract holds the resolver roles `mint()` needs.
-    /// @dev Call once after deployment. Cheaper to find out here than inside a user's mint.
-    function checkResolverRoles() external view {
-        if (!RESOLVER.hasRoles(0, REQUIRED_RESOLVER_ROOT_ROLES, address(this))) {
+    /// @dev Call once after connecting a parent. Cheaper to find out here than inside a
+    ///      user's mint. Takes the resolver rather than the registry so a deploy script
+    ///      can check a resolver before any parent references it.
+    function checkResolverRoles(IPermissionedResolver resolver) external view {
+        if (!resolver.hasRoles(0, REQUIRED_RESOLVER_ROOT_ROLES, address(this))) {
             revert MissingResolverRoles();
         }
     }

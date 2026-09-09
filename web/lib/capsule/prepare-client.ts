@@ -85,6 +85,10 @@ export async function prepareCapsuleRequest(
 
   const payload = {
     label,
+    // Echoed so the route builds the same capsule name this signature covers.
+    // Omitted when the caller only gave a full name, which is the shape
+    // `scripts/check-prepare.ts` uses against the deployment's own default.
+    ...(options.parentName === undefined ? {} : { parent: options.parentName.toLowerCase() }),
     owner: input.owner,
     context: input.context,
     telegramUrl: input.telegramUrl,

@@ -16,6 +16,7 @@
  *     caps are generous for real use and ruinous for a storage-fill attack.
  */
 import { getAddress, isAddress, type Address } from "viem";
+import { parentNameProblems } from "./parent";
 import { normalize } from "viem/ens";
 import { modelRefProblems, parseModelRef } from "./providers";
 
@@ -131,10 +132,22 @@ export function telegramTokenProblems(token: string): string[] {
  */
 export function parsePrepareRequest(
   body: unknown,
-  parentName: string,
+  defaultParentName: string,
 ): { ok: true; request: PrepareRequest; capsuleName: string } | { ok: false; problems: PrepareProblem[] } {
   const problems: PrepareProblem[] = [];
   if (!isRecord(body)) return { ok: false, problems: [{ field: "body", message: "expected a JSON object" }] };
+
+  // Which name this capsule goes under. Optional, defaulting to the deployment's
+  // own — so a client written against the single-parent version still works, and
+  // so the demo's front door needs no extra field.
+  //
+  // It is validated and echoed back into `capsuleName`, which is what the caller
+  // signed. That is the whole reason the parent is safe to take from a request
+  // body: the signature covers the full name, so a parent swapped in transit
+  // produces a signature that does not recover to the stated owner. Nothing here
+  // trusts the parent — it only refuses to invent one.
+  const parentName = (str(body, "parent") || defaultParentName).toLowerCase();
+  for (const message of parentNameProblems(parentName)) problems.push({ field: "parent", message });
 
   // Validated as typed, NOT lowercased first. Silently rewriting "Trader" to
   // "trader" would mean the label the caller sent is not the label that gets
@@ -233,6 +246,7 @@ export function parsePrepareRequest(
   return {
     ok: true,
     capsuleName: `${label}.${parentName}`.toLowerCase(),
+
     request: {
       label,
       owner,

@@ -17,6 +17,7 @@
  */
 import { getAddress, isHex, parseEther, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import { parentNameProblems } from "./parent";
 
 if (typeof window !== "undefined") {
   throw new Error("lib/capsule/env is server-only and was imported in a browser");
@@ -102,8 +103,20 @@ export type ServerEnv = {
    * error. Read it off `contracts/broadcast/DeployCapsuleMinter.s.sol`.
    */
   minterBlock: bigint;
-  /** e.g. "capsulefleet.eth" — every capsule is a label under this. */
-  parentName: string;
+  /**
+   * e.g. "capsulefleet.eth" — the name the launch form opens on and the fleet
+   * dashboard shows when nothing else is asked for.
+   *
+   * A DEFAULT, not a limit. `CapsuleMinter` serves every name whose owner has
+   * connected it, and the launch form, both API routes and `/fleet` all take a
+   * parent per request. This is here so the app has something to show a visitor
+   * who has not connected a name of their own, and so the demo has a front door.
+   *
+   * It is still required. A deployment with no default would render a launch
+   * form with an empty parent field and no way to guess one, and "which name?"
+   * is a worse first question than "here is ours, or use yours".
+   */
+  defaultParentName: string;
   /**
    * The origin written into `agent-endpoint[capsule]` at mint time, and therefore the
    * URL a booted runner will call for its prompt. On Vercel this is the
@@ -130,23 +143,25 @@ export function loadServerEnv(): ServerEnv {
   }
   const minterBlock = BigInt(rawBlock);
 
-  const parentName = requireEnv("CAPSULE_PARENT_NAME");
-  if (!parentName.endsWith(".eth") || parentName.split(".").length !== 2) {
-    throw new InvalidEnvError(
-      "CAPSULE_PARENT_NAME",
-      "must be a second-level name such as capsulefleet.eth",
-    );
+  // Validated with the same function the parent field in the browser uses, so a
+  // name this rejects is exactly a name the form would reject. The rule is
+  // second-level `.eth`, and `parentNameProblems` explains why.
+  const defaultParentName = requireEnv("CAPSULE_PARENT_NAME").toLowerCase();
+  const parentProblems = parentNameProblems(defaultParentName);
+  if (parentProblems.length > 0) {
+    throw new InvalidEnvError("CAPSULE_PARENT_NAME", parentProblems[0]);
   }
 
   // The browser gets its own copy of this one value (lib/capsule/public-env.ts),
   // because env.ts refuses to load client-side. Two copies drift, so they are
   // asserted against each other here — the same guard the record keys get. A
-  // mismatch means the launch form is offering subnames under the wrong parent.
+  // mismatch means the launch form opens on a different name than the one the
+  // API routes would treat as the default.
   const publicParentName = optionalEnv("NEXT_PUBLIC_CAPSULE_PARENT_NAME");
-  if (publicParentName !== undefined && publicParentName !== parentName) {
+  if (publicParentName !== undefined && publicParentName.toLowerCase() !== defaultParentName) {
     throw new InvalidEnvError(
       "NEXT_PUBLIC_CAPSULE_PARENT_NAME",
-      `is "${publicParentName}" but CAPSULE_PARENT_NAME is "${parentName}" — they must match`,
+      `is "${publicParentName}" but CAPSULE_PARENT_NAME is "${defaultParentName}" — they must match`,
     );
   }
 
@@ -162,7 +177,7 @@ export function loadServerEnv(): ServerEnv {
 
     minterAddress,
     minterBlock,
-    parentName,
+    defaultParentName,
     publicUrl: requireUrl("CAPSULE_PUBLIC_URL").replace(/\/+$/, ""),
   };
 }

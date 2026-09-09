@@ -44,17 +44,19 @@ export class ProvisionError extends Error {
 }
 
 export async function provisionCapsuleRequest(
-  input: { label: string; capsuleName: string },
+  input: { label: string; capsuleName: string; parent?: string },
   signMessage: SignMessage,
   options: { baseUrl?: string } = {},
 ): Promise<ProvisionResult> {
   const label = input.label.trim().toLowerCase();
   const timestamp = Math.floor(Date.now() / 1000);
 
-  // The capsule name is signed and the label is sent; the route rebuilds the
-  // name from its own parent and compares. A browser holding a stale parent
-  // therefore gets a signature failure rather than a machine started against a
-  // name it was not looking at.
+  // The capsule name is signed; the label and the parent are sent, and the route
+  // rebuilds the name from those two and compares. So the parent travelling in
+  // the body is not a way to redirect a provision: change it in flight and the
+  // rebuilt name no longer matches the signed one, and recovery fails. What the
+  // signature cannot establish is ownership, and the route does not ask it to —
+  // it reads `findOwner` on the parent's own registry.
   const signature = await signMessage({
     message: provisionMessage(input.capsuleName, timestamp),
   });
@@ -66,7 +68,7 @@ export async function provisionCapsuleRequest(
       [HEADER_TIMESTAMP]: String(timestamp),
       [HEADER_SIGNATURE]: signature,
     },
-    body: JSON.stringify({ label }),
+    body: JSON.stringify(input.parent === undefined ? { label } : { label, parent: input.parent }),
   });
 
   const body = (await response.json().catch(() => ({}))) as Record<string, unknown>;

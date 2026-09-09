@@ -18,16 +18,39 @@ import { loadFleet } from "@/lib/capsule/fleet-server";
    rather than sending a transaction to `undefined`. */
 export const dynamic = "force-dynamic";
 
-export default async function LaunchPage() {
-  const result = await loadFleet();
-  const taken = result.ok ? result.fleet.capsules.map((capsule) => capsule.label) : [];
+export default async function LaunchPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ parent?: string }>;
+}) {
+  // `?parent=` is where /connect sends someone who has just finished wiring their
+  // own name, so the form opens on it rather than on the demo's. It is only a
+  // default for the field — the browser re-reads the name off the chain before
+  // anything can be signed, so a bogus one costs a failed check, not a bad mint.
+  const { parent } = await searchParams;
 
+  let defaultParent = "";
   let minter: string | null = null;
   try {
-    minter = loadServerEnv().minterAddress;
+    const env = loadServerEnv();
+    minter = env.minterAddress;
+    defaultParent = env.defaultParentName;
   } catch {
     /* Reported on the mint step. The rest of the form is still usable. */
   }
 
-  return <LaunchFlow taken={taken} minter={minter} />;
+  const requested = parent?.trim().toLowerCase();
+  const opensOn = requested !== undefined && requested !== "" ? requested : defaultParent;
+
+  // Only meaningful for the deployment's own parent — `loadFleet` reads one name's
+  // capsules, and this render does not know which name the visitor will settle on.
+  // The form greys out taken labels when it is showing that parent and stops when
+  // it is not; either way the mint is gated on chain, twice.
+  const result = await loadFleet();
+  const taken =
+    result.ok && opensOn === defaultParent
+      ? result.fleet.capsules.map((capsule) => capsule.label)
+      : [];
+
+  return <LaunchFlow taken={taken} minter={minter} defaultParent={opensOn} />;
 }

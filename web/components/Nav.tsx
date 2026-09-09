@@ -7,6 +7,7 @@ import ConnectButton from "./ConnectButton";
 
 const LINKS = [
   { href: "/launch", label: "Launch" },
+  { href: "/connect", label: "Connect a name" },
   { href: "/fleet", label: "Fleet" },
   { href: "/analyst", label: "Analyst" },
 ];
