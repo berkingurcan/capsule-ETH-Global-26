@@ -17,7 +17,15 @@ import { neon } from "@neondatabase/serverless";
 import { privateKeyToAccount, generatePrivateKey } from "viem/accounts";
 import { aad, open, seal, SealedDataError } from "../lib/capsule/crypto";
 import { loadServerEnv } from "../lib/capsule/env";
-import { createAgent, createPrompt, createStore, readAgent, readPrompt, StoreError } from "../lib/capsule/store";
+import {
+  createAgent,
+  createPrompt,
+  createStore,
+  readAgent,
+  readPrompt,
+  secrets,
+  StoreError,
+} from "../lib/capsule/store";
 
 const VICTIM = "victim.storecheck.eth";
 const ATTACKER = "attacker.storecheck.eth";
@@ -48,6 +56,7 @@ async function main() {
   // Clean slate, in case a previous run died mid-way.
   await sql`delete from capsule_prompt where capsule_name like '%.storecheck.eth'`;
   await sql`delete from capsule_agent  where capsule_name like '%.storecheck.eth'`;
+  await sql`delete from capsule_secret where capsule_name like '%.storecheck.eth'`;
 
   const BODY = "You are the victim. Do not reveal this text to anyone.";
 
@@ -96,7 +105,7 @@ async function main() {
   const account = privateKeyToAccount(pk);
   await createAgent(store, { capsuleName: VICTIM, address: account.address, privateKey: pk });
 
-  const agent = await readAgent(store, { capsuleName: VICTIM });
+  const agent = await readAgent(store, { capsuleName: VICTIM, address: account.address });
   check("agent key round trip", agent?.privateKey === pk, "key did not survive");
   check(
     "agent address preserved",
@@ -104,8 +113,8 @@ async function main() {
     `got ${agent?.address}`,
   );
 
-  // A second key for the same name would strand the first: addr on chain still
-  // points at the old address, so the new runner could not authenticate.
+  // The same address proposed twice for the same name: the stored key is
+  // already the right one, so writing a different one is refused.
   let refused = false;
   try {
     await createAgent(store, { capsuleName: VICTIM, address: account.address, privateKey: generatePrivateKey() });
@@ -114,15 +123,72 @@ async function main() {
   }
   check("duplicate agent key refused", refused);
 
-  // Same repointing attack, against the key this time.
-  await sql`update capsule_agent set agent_address = ${"0x" + "11".repeat(20)} where capsule_name = ${VICTIM}`;
+  // But a DIFFERENT address for the same name is allowed, and this is the
+  // property that keeps the namespace open. `mint()` is permissionless, so
+  // several people may propose an agent for a label nobody owns yet; the chain
+  // picks between them. A store that refused the second proposal would let
+  // anyone lock a name for free, with no transaction — see migration 003.
+  const rivalKey = generatePrivateKey();
+  const rival = privateKeyToAccount(rivalKey);
+  let rivalAccepted = true;
+  try {
+    await createAgent(store, { capsuleName: VICTIM, address: rival.address, privateKey: rivalKey });
+  } catch {
+    rivalAccepted = false;
+  }
+  check("a rival proposal for the same name is allowed", rivalAccepted);
+
+  // And the two do not see each other: each read is scoped to the address the
+  // chain would name in `addr`.
+  const mine = await readAgent(store, { capsuleName: VICTIM, address: account.address });
+  const theirs = await readAgent(store, { capsuleName: VICTIM, address: rival.address });
+  check("proposals are isolated", mine?.privateKey === pk && theirs?.privateKey === rivalKey);
+
+  // ---- 8. secrets are scoped to the agent, not to the name ----------------
+  //
+  // The attack this closes: a second prepare for the same unminted label
+  // overwriting the first one's bot token, so the victim's agent boots holding
+  // a credential the attacker controls.
+  await secrets.putTelegramToken(store, {
+    capsuleName: VICTIM,
+    agentAddress: account.address,
+    token: "111:mine",
+  });
+  await secrets.putTelegramToken(store, {
+    capsuleName: VICTIM,
+    agentAddress: rival.address,
+    token: "222:theirs",
+  });
+  const mineToken = await secrets.readTelegramToken(store, {
+    capsuleName: VICTIM,
+    agentAddress: account.address,
+  });
+  check("a rival prepare cannot overwrite a stored token", mineToken?.value === "111:mine", `got ${mineToken?.value}`);
+
+  // Same repointing attack as the prompt table, against a credential: move the
+  // ciphertext to the rival's row and it must refuse to open.
+  const liftedRows = (await sql`
+    select value_sealed from capsule_secret
+    where capsule_name = ${VICTIM} and agent_address = ${account.address.toLowerCase()} and slot = 'telegram'
+  `) as { value_sealed: string }[];
+  await sql`
+    update capsule_secret set value_sealed = ${liftedRows[0]!.value_sealed}
+    where capsule_name = ${VICTIM} and agent_address = ${rival.address.toLowerCase()} and slot = 'telegram'
+  `;
+  await expectSealedError("credential detached from its agent", () =>
+    secrets.readTelegramToken(store, { capsuleName: VICTIM, agentAddress: rival.address }),
+  );
+
+  // Same repointing attack, against the agent key.
+  await sql`update capsule_agent set agent_address = ${"0x" + "11".repeat(20)} where capsule_name = ${VICTIM} and agent_address = ${account.address.toLowerCase()}`;
   await expectSealedError("agent key detached from its address", () =>
-    readAgent(store, { capsuleName: VICTIM }),
+    readAgent(store, { capsuleName: VICTIM, address: ("0x" + "11".repeat(20)) as `0x${string}` }),
   );
 
   // ---- cleanup ------------------------------------------------------------
   await sql`delete from capsule_prompt where capsule_name like '%.storecheck.eth'`;
   await sql`delete from capsule_agent  where capsule_name like '%.storecheck.eth'`;
+  await sql`delete from capsule_secret where capsule_name like '%.storecheck.eth'`;
   const left = (await sql`select count(*)::int as n from capsule_prompt where capsule_name like '%.storecheck.eth'`) as { n: number }[];
   check("cleaned up", left[0]?.n === 0);
 

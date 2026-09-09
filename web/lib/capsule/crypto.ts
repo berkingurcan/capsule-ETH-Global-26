@@ -92,10 +92,17 @@ export const aad = {
   prompt: (ref: string, capsuleName: string) => `capsule_prompt:${ref}:${capsuleName}`,
   agent: (capsuleName: string, agentAddress: string) =>
     `capsule_agent:${capsuleName}:${agentAddress.toLowerCase()}`,
-  // Binds a credential to both the capsule and the slot. Moving a sealed
-  // provider key to another capsule, or to another provider's row on the same
-  // capsule, produces a row that will not open.
-  secret: (capsuleName: string, slot: string) => `capsule_secret:${capsuleName}:${slot}`,
+  // Binds a credential to the capsule, the agent it was stored for, and the
+  // slot. Moving a sealed provider key to another capsule, to another agent's
+  // proposal for the same capsule, or to another provider's row on the same
+  // agent, produces a row that will not open.
+  //
+  // The agent address is in here because rows are written before the mint, when
+  // nobody owns the name yet — see db/migrations/003. Without it, a second
+  // prepare for the same label could hand its own bot token to somebody else's
+  // agent, and the envelope would happily decrypt.
+  secret: (capsuleName: string, agentAddress: string, slot: string) =>
+    `capsule_secret:${capsuleName}:${agentAddress.toLowerCase()}:${slot}`,
 };
 
 /** Constant-time compare, for anywhere a secret is checked against user input. */

@@ -31,7 +31,15 @@ import {
   useState,
   useSyncExternalStore,
 } from "react";
-import { createWalletClient, custom, getAddress, type Address, type WalletClient } from "viem";
+import {
+  createPublicClient,
+  createWalletClient,
+  custom,
+  getAddress,
+  type Address,
+  type PublicClient,
+  type WalletClient,
+} from "viem";
 import { CHAIN } from "@/lib/capsule/chain";
 import {
   findWallet,
@@ -62,6 +70,17 @@ export type WalletState = {
   switchChain: () => Promise<void>;
   /** Null unless connected and on the right chain. Signing is not offered otherwise. */
   getWalletClient: () => WalletClient | null;
+  /**
+   * A read client over the *same* provider the user is signing with.
+   *
+   * The app needs one in the browser to simulate a mint and to wait for its
+   * receipt, and the obvious way to get it — a `NEXT_PUBLIC_` RPC URL — would
+   * publish an RPC key to every visitor. The wallet is already talking to this
+   * chain on the user's behalf, so it is both the cheapest transport and the
+   * honest one: the simulation runs against the node that will accept the
+   * transaction, not against a different node that might disagree.
+   */
+  getPublicClient: () => PublicClient | null;
 };
 
 const WalletContext = createContext<WalletState | null>(null);
@@ -264,6 +283,12 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
     return createWalletClient({ account: address, chain: CHAIN, transport: custom(provider) });
   }, [address, chainId]);
 
+  const getPublicClient = useCallback((): PublicClient | null => {
+    const provider = providerRef.current;
+    if (provider === null || chainId !== CHAIN.id) return null;
+    return createPublicClient({ chain: CHAIN, transport: custom(provider) });
+  }, [chainId]);
+
   const value = useMemo<WalletState>(
     () => ({
       status,
@@ -277,8 +302,22 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
       disconnect,
       switchChain,
       getWalletClient,
+      getPublicClient,
     }),
-    [status, address, chainId, chainOk, walletName, error, wallets, connect, disconnect, switchChain, getWalletClient],
+    [
+      status,
+      address,
+      chainId,
+      chainOk,
+      walletName,
+      error,
+      wallets,
+      connect,
+      disconnect,
+      switchChain,
+      getWalletClient,
+      getPublicClient,
+    ],
   );
 
   return <WalletContext.Provider value={value}>{children}</WalletContext.Provider>;
