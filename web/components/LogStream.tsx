@@ -9,21 +9,21 @@ import type { Agent } from "@/lib/mock";
 const MORE: Record<string, string[]> = {
   trader: [
     "ETH/USDC 3,219.05 · would wait — spread 0.4%",
-    "heartbeat written · block 7412891",
+    "heartbeat written · beat-8 · block 11662622",
     "telegram: answered @berkin in 620ms",
-    "heartbeat written · block 7412895",
+    "heartbeat written · beat-9 · block 11662629",
   ],
   dev: [
     "scanning capsule/runner · no changes",
-    "heartbeat written · block 7412892",
+    "heartbeat written · beat-6 · block 11662618",
     "telegram: sent commit digest",
   ],
   marketing: [
-    "resolved marketing.berkin.eth · 6 records",
-    "model=claude-sonnet-5 tools=draft,schedule,notify",
-    "secrets cap_71a4ef unsealed",
+    "resolved marketing.capsulefleet.eth · 9 records",
+    "agent-model=google/gemini-3.1-pro-preview",
+    "prompt cap_71a4ef · 312 chars, sha256:9d1e4a77b0c2",
     "telegram bot online · @berkin_mktg_bot",
-    "heartbeat written · block 7412896",
+    "heartbeat written · beat-1 · block 11662631",
   ],
   research: [],
 };
@@ -31,7 +31,7 @@ const MORE: Record<string, string[]> = {
 function paint(line: string) {
   if (line.includes("revert") || line.includes("EACUnauthorized")) return "r";
   if (line.startsWith("heartbeat")) return "g";
-  if (line.startsWith("x402")) return "p";
+  if (line.startsWith("denied") || line.startsWith("confirmed")) return "r";
   if (line.startsWith("telegram")) return "y";
   return "w";
 }

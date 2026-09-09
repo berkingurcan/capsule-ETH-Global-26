@@ -7,7 +7,6 @@ const DOT: Record<Event["kind"], string> = {
   recalled: "var(--alarm)",
   record: "var(--vend-300)",
   role: "var(--sun)",
-  payment: "var(--bubble)",
   heartbeat: "var(--line)",
 };
 
@@ -19,7 +18,7 @@ export default function ActivityFeed({ limit }: { limit?: number }) {
       <div className="dashrow" style={{ background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
         <span className="label">Fleet activity</span>
         <span className="push hint mono" style={{ fontSize: 11 }}>
-          subgraph-sepolia + subgraph-base
+          ETH Sepolia
         </span>
       </div>
 
@@ -40,7 +39,7 @@ export default function ActivityFeed({ limit }: { limit?: number }) {
           <div style={{ minWidth: 0, flex: 1 }}>
             <div className="row wrapflex" style={{ gap: 8 }}>
               <b style={{ fontSize: 14.5 }}>{e.text}</b>
-              <ChainTag chain={e.chain} />
+              <ChainTag />
             </div>
             <div className="mono" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 3 }}>
               {e.name}

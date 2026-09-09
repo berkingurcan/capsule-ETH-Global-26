@@ -8,31 +8,54 @@ import Heartbeat from "./Heartbeat";
 import Sparkline from "./Sparkline";
 import LogStream from "./LogStream";
 import RecallDialog from "./RecallDialog";
-import ChainTag from "./ChainTag";
-import { PAYMENTS, fullName, usd, type Agent } from "@/lib/mock";
+import { RECORD_KEYS } from "@/lib/capsule/records";
+import { fullName, type Agent } from "@/lib/mock";
 
-type Row = { key: string; value: string; writer: "owner" | "agent"; editable?: boolean };
+/* The record table is the whole argument of the project, so it shows the
+   nine keys the mint actually writes and nothing else — no `agent.tools`,
+   no `agent.price`, no `agent.secrets`. Those were invented by an earlier
+   mock and never existed on chain.
+
+   Keys are imported, never spelled. A literal here that drifts from
+   CapsuleMinter.sol is invisible: the resolver reverts against the
+   name-level resource whichever key was denied, so a typo reads exactly
+   like a revoked permission. */
+
+type Row = {
+  key: string;
+  value: string;
+  writer: "owner" | "agent";
+  editable?: boolean;
+  note?: string;
+};
 
 export default function AgentDetail({ agent }: { agent: Agent }) {
   const [dead, setDead] = useState(agent.status === "recalled");
   const [dialog, setDialog] = useState(false);
-  const [prompt, setPrompt] = useState(agent.prompt);
-  const [price, setPrice] = useState(agent.price);
+  const [promptRef, setPromptRef] = useState(agent.promptRef);
   const [editing, setEditing] = useState<string | null>(null);
   const [saved, setSaved] = useState<string | null>(null);
 
   const status = dead ? ("recalled" as const) : agent.status;
   const name = fullName(agent);
+  const short = agent.addr.slice(0, 10) + "…" + agent.addr.slice(-4);
 
   const rows: Row[] = [
-    { key: "addr", value: agent.addr.slice(0, 10) + "…" + agent.addr.slice(-4), writer: "owner" },
-    { key: "agent.model", value: agent.model, writer: "owner" },
-    { key: "agent.tools", value: agent.tools.join(","), writer: "owner" },
-    { key: "agent.prompt", value: prompt, writer: "owner", editable: true },
-    { key: "agent.endpoint", value: agent.endpoint, writer: "owner" },
-    { key: "agent.price", value: price, writer: "owner", editable: true },
-    { key: "agent.heartbeat", value: "1757001600", writer: "agent" },
-    { key: "agent.secrets", value: agent.secretsRef, writer: "owner" },
+    { key: "addr", value: short, writer: "owner", note: "the agent's own EOA" },
+    { key: RECORD_KEYS.class, value: "Agent", writer: "owner", note: "ENSIP-27" },
+    { key: RECORD_KEYS.schema, value: agent.schemaUri, writer: "owner", note: "ENSIP-27" },
+    { key: RECORD_KEYS.context, value: agent.context, writer: "owner", note: "ENSIP-26" },
+    { key: RECORD_KEYS.endpointWeb, value: agent.telegramUrl, writer: "owner", note: "ENSIP-26" },
+    { key: RECORD_KEYS.endpointCapsule, value: agent.capsuleEndpoint, writer: "owner", note: "ENSIP-26" },
+    { key: RECORD_KEYS.model, value: agent.model, writer: "owner" },
+    { key: RECORD_KEYS.runtime, value: agent.runtime, writer: "owner" },
+    { key: RECORD_KEYS.prompt, value: promptRef, writer: "owner", editable: true, note: "a pointer, never the body" },
+    { key: agent.registration, value: "1", writer: "owner", note: "ENSIP-25" },
+    {
+      key: RECORD_KEYS.heartbeat,
+      value: agent.heartbeat === "" ? "— never written" : agent.heartbeat,
+      writer: "agent",
+    },
   ];
 
   function save(key: string) {
@@ -40,8 +63,6 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
     setSaved(key);
     setTimeout(() => setSaved(null), 2600);
   }
-
-  const mine = PAYMENTS.filter((p) => p.from === name || p.to === name);
 
   return (
     <main className="page">
@@ -91,23 +112,28 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
               <div className="row" style={{ padding: "14px 20px", background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
                 <span className="label">The record</span>
                 <span className="push hint mono" style={{ fontSize: 11.5 }}>
-                  PublicResolverV2 · Sepolia
+                  PermissionedResolver · Sepolia
                 </span>
               </div>
               <div className="scroller">
                 <table>
                   <thead>
                     <tr>
-                      <th style={{ width: "26%" }}>Key</th>
+                      <th style={{ width: "30%" }}>Key</th>
                       <th>Value</th>
-                      <th style={{ width: "22%" }}>Who may write</th>
+                      <th style={{ width: "20%" }}>Who may write</th>
                     </tr>
                   </thead>
                   <tbody>
                     {rows.map((r) => (
                       <tr key={r.key}>
-                        <td className="m" style={{ fontWeight: 600 }}>
+                        <td className="m" style={{ fontWeight: 600, wordBreak: "break-all" }}>
                           {r.key}
+                          {r.note && (
+                            <div className="hint" style={{ fontWeight: 400, marginTop: 2 }}>
+                              {r.note}
+                            </div>
+                          )}
                         </td>
                         <td className="m" style={{ color: "var(--ink)" }}>
                           {editing === r.key ? (
@@ -115,10 +141,8 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
                               <input
                                 className="input"
                                 autoFocus
-                                value={r.key === "agent.prompt" ? prompt : price}
-                                onChange={(e) =>
-                                  r.key === "agent.prompt" ? setPrompt(e.target.value) : setPrice(e.target.value)
-                                }
+                                value={promptRef}
+                                onChange={(e) => setPromptRef(e.target.value)}
                               />
                               <button className="btn btn-sm btn-mint" onClick={() => save(r.key)}>
                                 Write
@@ -130,7 +154,7 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
                               {saved === r.key && (
                                 <span className="pill run" style={{ flex: "none" }}>
                                   <span className="led" />
-                                  written 0x3a80…11d4
+                                  written 0x9aa2…f2a2
                                 </span>
                               )}
                               {r.editable && !dead && saved !== r.key && (
@@ -156,8 +180,9 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
               <div className="notice paper" style={{ border: 0, borderTop: "3px solid var(--ink)", borderRadius: 0 }}>
                 <span className="tag ink">Note</span>
                 <p style={{ margin: 0 }}>
-                  <span className="mono">agent.heartbeat</span> is the only key the agent holds a role on. Every other
-                  row is yours. Edit one and the runner picks it up on its next 30-second read — no redeploy.
+                  <span className="mono">{RECORD_KEYS.heartbeat}</span> is the only key the agent holds a role on.
+                  Every other row is yours. Edit one and the runner picks it up on its next 30-second read — no
+                  redeploy.
                 </p>
               </div>
             </div>
@@ -188,11 +213,11 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
               </div>
               <div className="stack">
                 {[
-                  ["Wallet", agent.addr.slice(0, 10) + "…" + agent.addr.slice(-4)],
+                  ["Wallet", short],
                   ["Machine", dead ? "destroyed" : agent.machine],
                   ["Region", agent.region],
                   ["Telegram", agent.telegram],
-                  ["Endpoint", agent.endpoint.replace("https://", "")],
+                  ["Control plane", agent.capsuleEndpoint.replace("https://", "")],
                 ].map(([k, v]) => (
                   <div key={k} className="kv" style={{ padding: "10px 0" }}>
                     <span className="hint">{k}</span>
@@ -204,65 +229,12 @@ export default function AgentDetail({ agent }: { agent: Agent }) {
               </div>
             </div>
 
-            <div className="panel" style={{ overflow: "hidden" }}>
-              <div className="row" style={{ padding: "14px 20px", background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
-                <span className="label">Money</span>
-                <span className="push">
-                  <ChainTag chain="base" />
-                </span>
-              </div>
-              <div style={{ padding: "16px 20px" }}>
-                <div className="row" style={{ gap: 20, marginBottom: 14 }}>
-                  <div>
-                    <div className="label">Held</div>
-                    <div className="figure" style={{ fontSize: 22 }}>
-                      {usd(agent.balance)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="label">Earned</div>
-                    <div className="figure" style={{ fontSize: 22, color: "var(--mint-700)" }}>
-                      {usd(agent.earned)}
-                    </div>
-                  </div>
-                  <div>
-                    <div className="label">Spent</div>
-                    <div className="figure" style={{ fontSize: 22 }}>
-                      {usd(agent.spent)}
-                    </div>
-                  </div>
-                </div>
-                {mine.length === 0 ? (
-                  <p className="hint" style={{ margin: 0 }}>
-                    No paid calls yet.
-                  </p>
-                ) : (
-                  <div className="stack">
-                    {mine.map((p) => (
-                      <div key={p.id} className="row" style={{ padding: "10px 0", gap: 10 }}>
-                        <span
-                          className="tag"
-                          style={{
-                            background: p.to === name ? "var(--mint)" : "var(--bubble)",
-                            color: "var(--ink)",
-                          }}
-                        >
-                          {p.to === name ? "in" : "out"}
-                        </span>
-                        <div style={{ minWidth: 0 }}>
-                          <div style={{ fontSize: 13.5, fontWeight: 600 }}>{p.reason}</div>
-                          <div className="hint mono" style={{ fontSize: 11 }}>
-                            {p.at} · {p.tx}
-                          </div>
-                        </div>
-                        <span className="figure push" style={{ fontSize: 14 }}>
-                          {usd(p.amount)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
+            <div className="notice paper">
+              <span className="tag ink">Gas</span>
+              <p style={{ margin: 0 }}>
+                A beat costs 47,639 gas, measured. The agent wallet pays for it and holds nothing else — it is the
+                least privileged key in the system: one text record, on one name.
+              </p>
             </div>
           </div>
         </div>

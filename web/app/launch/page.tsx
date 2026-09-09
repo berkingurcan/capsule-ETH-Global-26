@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Capsule from "@/components/Capsule";
-import { MINT_PRICE, PARENT, ROLES, usd, type Role } from "@/lib/mock";
+import { RECORD_KEYS } from "@/lib/capsule/records";
+import { PARENT, ROLES, type Role } from "@/lib/mock";
 import {
   PROVIDERS,
   PROVIDER_IDS,
@@ -13,15 +14,18 @@ import {
 } from "@/lib/capsule/providers";
 
 /* ------------------------------------------------------------------
-   The launchpad. Six steps, one form — the order matters: secrets are
-   entered before payment so the runner has everything it needs the
-   moment the mint lands, and the record only ever holds a pointer.
-   Nothing here signs anything; it is a design demo.
+   The launchpad. Five steps, one form — the order matters: secrets are
+   entered before the mint so the runner has everything it needs the
+   moment the name exists, and the record only ever holds a pointer.
+
+   The x402 checkout step was removed on 2026-09-08 (DECISIONS.md): the
+   hackathon deployment mints for free, and a fee — if it ever exists —
+   is one msg.value check on CapsuleMinter.mint().
+
+   Nothing here signs anything yet; it is still a design demo.
    ------------------------------------------------------------------ */
 
-const STEPS = ["Parent", "Roles", "Configure", "Pay", "Mint", "Live"];
-
-const ALL_TOOLS = ["price", "swap", "repo", "diff", "draft", "schedule", "search", "notify"];
+const STEPS = ["Parent", "Roles", "Configure", "Mint", "Live"];
 
 /* Every `<provider>/<model>` the picker offers, grouped the way it renders.
    Not authoritative — OpenClaw's catalog is, and an owner may write any model
@@ -38,9 +42,10 @@ type Draft = {
   cap: string;
   /** `<provider>/<model>`, written verbatim into `agent-model`. */
   model: string;
-  tools: string[];
+  /** `agent-context` — what this agent is, in plain language. */
+  context: string;
+  /** The prompt body. Sealed in the store; the record gets the pointer. */
   prompt: string;
-  price: string;
   token: string;
   /**
    * One API key per provider, not one per capsule.
@@ -74,9 +79,8 @@ function draftFrom(r: Role): Draft {
     title: r.title,
     cap: r.cap,
     model: r.model,
-    tools: [...r.tools],
+    context: r.context,
     prompt: r.prompt,
-    price: "0.10",
     token: "8412996731:AAH" + r.slug.slice(0, 3) + "x9Qd7Lm2pR",
     keys: { [parseModelRef(r.model)?.provider as ProviderId]: "••••••••••••••••" },
   };
@@ -90,8 +94,6 @@ export default function LaunchPage() {
   );
   const [tab, setTab] = useState(0);
   const [custom, setCustom] = useState("");
-
-  const total = picked.length * MINT_PRICE;
 
   function toggle(r: Role) {
     if (r.taken) return;
@@ -122,7 +124,7 @@ export default function LaunchPage() {
             </p>
             <h2 style={{ fontSize: 30, marginTop: 6 }}>Hire an agent under {PARENT.name}</h2>
           </div>
-          {step > 0 && step < 5 && (
+          {step > 0 && step < 4 && (
             <button className="btn btn-sm btn-ghost" onClick={() => setStep(0)}>
               Restart demo
             </button>
@@ -146,7 +148,6 @@ export default function LaunchPage() {
             toggle={toggle}
             custom={custom}
             setCustom={setCustom}
-            total={total}
             back={() => setStep(0)}
             next={() => setStep(2)}
           />
@@ -163,11 +164,9 @@ export default function LaunchPage() {
           />
         )}
 
-        {step === 3 && <StepPay drafts={drafts} total={total} back={() => setStep(2)} next={() => setStep(4)} />}
+        {step === 3 && <StepMint drafts={drafts} back={() => setStep(2)} next={() => setStep(4)} />}
 
-        {step === 4 && <StepMint drafts={drafts} next={() => setStep(5)} />}
-
-        {step === 5 && <StepLive drafts={drafts} />}
+        {step === 4 && <StepLive drafts={drafts} />}
       </div>
     </main>
   );
@@ -179,7 +178,7 @@ function StepParent({ next }: { next: () => void }) {
   const checks = [
     ["You own it", "ETHRegistry says 0x7a1c…9e40"],
     ["Subregistry is live", "deployed by the Verifiable Factory"],
-    ["Resolver is set", "PublicResolverV2, EAC enabled"],
+    ["Resolver is set", "PermissionedResolver, EAC enabled"],
     ["Capsule can write below it", "admin role on the subregistry only"],
   ];
 
@@ -255,7 +254,6 @@ function StepRoles({
   toggle,
   custom,
   setCustom,
-  total,
   back,
   next,
 }: {
@@ -263,7 +261,6 @@ function StepRoles({
   toggle: (r: Role) => void;
   custom: string;
   setCustom: (v: string) => void;
-  total: number;
   back: () => void;
   next: () => void;
 }) {
@@ -339,12 +336,6 @@ function StepRoles({
         <span className="mono push" style={{ fontSize: 13, fontWeight: 600, color: "var(--muted)" }}>
           {picked.length} SELECTED
         </span>
-        <div style={{ textAlign: "right" }}>
-          <div className="label">Total</div>
-          <div className="figure" style={{ fontSize: 20 }}>
-            {usd(total)} USDC
-          </div>
-        </div>
         <button className="btn btn-primary" disabled={picked.length === 0} onClick={next}>
           Configure →
         </button>
@@ -424,36 +415,23 @@ function StepConfigure({
           </div>
 
           <div className="field">
-            <span className="label">agent.tools</span>
-            <div className="row wrapflex" style={{ gap: 7 }}>
-              {ALL_TOOLS.map((t) => {
-                const on = d.tools.includes(t);
-                return (
-                  <button
-                    key={t}
-                    type="button"
-                    className="tag"
-                    aria-pressed={on}
-                    style={{
-                      border: on ? "2px solid var(--ink)" : "2px solid var(--line)",
-                      background: on ? "var(--mint)" : "transparent",
-                      color: on ? "var(--ink)" : "var(--muted)",
-                      cursor: "pointer",
-                    }}
-                    onClick={() =>
-                      patch(i, { tools: on ? d.tools.filter((x) => x !== t) : [...d.tools, t] })
-                    }
-                  >
-                    {t}
-                  </button>
-                );
-              })}
-            </div>
+            <label className="label" htmlFor="context">
+              {RECORD_KEYS.context}
+            </label>
+            <input
+              id="context"
+              className="input"
+              value={d.context}
+              onChange={(e) => patch(i, { context: e.target.value })}
+            />
+            <span className="hint">
+              ENSIP-26. One plain sentence, and the only record a generic ENS client will show a human.
+            </span>
           </div>
 
           <div className="field">
             <label className="label" htmlFor="prompt">
-              agent.prompt
+              {RECORD_KEYS.prompt} · the body
             </label>
             <textarea
               id="prompt"
@@ -462,15 +440,9 @@ function StepConfigure({
               onChange={(e) => patch(i, { prompt: e.target.value })}
             />
             <span className="hint">
-              Change this later and the agent picks it up within 30 seconds. No redeploy.
+              This never goes on chain. It is sealed in the store and the record holds only the pointer —
+              change the pointer later and the agent picks it up within 30 seconds. No redeploy.
             </span>
-          </div>
-
-          <div className="field" style={{ maxWidth: 220 }}>
-            <label className="label" htmlFor="price">
-              agent.price · USDC per call
-            </label>
-            <input id="price" className="input" value={d.price} onChange={(e) => patch(i, { price: e.target.value })} />
           </div>
         </div>
 
@@ -574,145 +546,27 @@ function StepConfigure({
           ← Back
         </button>
         <button className="btn btn-primary push" onClick={next}>
-          Continue to payment →
+          Continue to mint →
         </button>
       </div>
     </div>
   );
 }
 
-/* ---------------- 04 · x402 ---------------- */
+/* ---------------- 04 · mint ---------------- */
 
-const HANDSHAKE = [
-  { d: "→ ", w: "POST", t: " /deploy HTTP/1.1" },
-  { d: "← ", y: "402 Payment Required" },
-  { d: "   x-402-price: ", w: "AMOUNT USDC" },
-  { d: "   x-402-network: ", w: "base-sepolia" },
-  { d: "   x-402-recipient: ", w: "capsule.eth" },
-  { d: "→ ", w: "POST", t: " /deploy HTTP/1.1" },
-  { d: "   X-PAYMENT: ", p: "eip3009 0x9f2e…bc71" },
-  { d: "← ", g: "200 OK", t: "  · settled in 183 ms" },
-];
-
-function StepPay({
-  drafts,
-  total,
-  back,
-  next,
-}: {
-  drafts: Draft[];
-  total: number;
-  back: () => void;
-  next: () => void;
-}) {
-  const [n, setN] = useState(0);
-  const [paying, setPaying] = useState(false);
-
-  useEffect(() => {
-    if (!paying) return;
-    if (n >= HANDSHAKE.length) {
-      const t = setTimeout(next, 900);
-      return () => clearTimeout(t);
-    }
-    const t = setTimeout(() => setN((x) => x + 1), n === 1 ? 700 : 320);
-    return () => clearTimeout(t);
-  }, [paying, n, next]);
-
-  return (
-    <div className="panel pad-lg">
-      <div className="stepline">
-        <span className="stepnum">04</span>
-        <span className="tag sun">x402 checkout</span>
-      </div>
-      <p className="stitle">Pay in the request, not in a modal</p>
-      <p className="ssub">
-        The deploy endpoint answers <span className="mono">402 Payment Required</span>. Your wallet signs a gasless
-        EIP-3009 authorisation, the retry carries it in a header, and the facilitator settles on Base Sepolia. One
-        signature covers every agent in the order.
-      </p>
-
-      <div className="grid g-side">
-        <div className="tile">
-          <div className="label" style={{ marginBottom: 12 }}>
-            Order
-          </div>
-          {drafts.map((d) => (
-            <div key={d.slug} className="kv">
-              <span className="ensname" style={{ fontSize: 13.5 }}>
-                {d.slug}
-                <span className="p">.{PARENT.name}</span>
-              </span>
-              <span className="figure" style={{ fontSize: 14 }}>
-                {usd(MINT_PRICE)}
-              </span>
-            </div>
-          ))}
-          <div className="kv" style={{ paddingTop: 14 }}>
-            <b>Total</b>
-            <span className="figure" style={{ fontSize: 24 }}>
-              {usd(total)} USDC
-            </span>
-          </div>
-          <p className="hint" style={{ margin: "6px 0 16px" }}>
-            No approval transaction and no gas — the signature is the payment.
-          </p>
-          <button className="btn btn-primary btn-block" disabled={paying} onClick={() => setPaying(true)}>
-            {paying ? "Settling…" : "Sign & pay " + usd(total) + " USDC"}
-          </button>
-        </div>
-
-        <div className="panel flat" style={{ overflow: "hidden" }}>
-          <div className="row" style={{ padding: "12px 18px", background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
-            <span className="label">Live handshake</span>
-            {n >= HANDSHAKE.length ? (
-              <span className="pill run push">
-                <span className="led" />
-                183 ms
-              </span>
-            ) : (
-              <span className="pill quiet push">idle</span>
-            )}
-          </div>
-          <pre className="term flush" style={{ minHeight: 236 }}>
-            {HANDSHAKE.slice(0, n).map((l, k) => (
-              <span key={k}>
-                <span className="d">{l.d}</span>
-                {l.w && <span className="w">{l.w.replace("AMOUNT", usd(total))}</span>}
-                {l.y && <span className="y">{l.y}</span>}
-                {l.g && <span className="g">{l.g}</span>}
-                {l.p && <span className="p">{l.p}</span>}
-                {l.t && <span className="d">{l.t}</span>}
-                {"\n"}
-              </span>
-            ))}
-            {paying && n < HANDSHAKE.length && <span className="caret" />}
-            {!paying && <span className="d">waiting for the first request…</span>}
-          </pre>
-        </div>
-      </div>
-
-      <div className="row" style={{ marginTop: 26 }}>
-        <button className="btn btn-ghost btn-sm" onClick={back} disabled={paying}>
-          ← Back
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/* ---------------- 05 · mint ---------------- */
-
-function StepMint({ drafts, next }: { drafts: Draft[]; next: () => void }) {
+function StepMint({ drafts, back, next }: { drafts: Draft[]; back: () => void; next: () => void }) {
   const [n, setN] = useState(0);
   const [signing, setSigning] = useState(false);
   const lines = useMemo(
     () => [
-      "CapsuleMinter.mintAgent() ×" + drafts.length,
-      "register subname under berkin.eth",
-      "setText ×6 per agent · model, tools, prompt, endpoint, price, secrets",
-      "grantRoles(resource, agent, ROLE_HEARTBEAT)",
-      "emit AgentMinted",
-      "confirmed · block 7412903",
+      "CapsuleMinter.mint() ×" + drafts.length,
+      "register subname under " + PARENT.name,
+      "authorizeNameRoles(owner) · you keep the kill switch",
+      "setAddr + setText ×9 per agent · ENSIP-25/26/27",
+      "authorizeTextRoles(" + RECORD_KEYS.heartbeat + ", agent, true)",
+      "emit CapsuleMinted",
+      "confirmed · block 11662631",
     ],
     [drafts.length]
   );
@@ -730,7 +584,7 @@ function StepMint({ drafts, next }: { drafts: Draft[]; next: () => void }) {
   return (
     <div className="panel pad-lg">
       <div className="stepline">
-        <span className="stepnum">05</span>
+        <span className="stepnum">04</span>
         <span className="tag">Mint</span>
       </div>
       <p className="stitle">One transaction does all four things</p>
@@ -747,9 +601,10 @@ function StepMint({ drafts, next }: { drafts: Draft[]; next: () => void }) {
           <div className="stack">
             {[
               ["Register", drafts.map((d) => d.slug).join(", ") + " under " + PARENT.name],
-              ["Write records", "6 keys per agent, read by the runner at boot"],
-              ["Grant the role", "agent.heartbeat — the only thing the agent may write"],
-              ["Emit AgentMinted", "so the subgraph sees it in one event"],
+              ["Hand you control", "every resolver role on the name, including the kill switch"],
+              ["Write records", "9 keys per agent, read by the runner at boot"],
+              ["Grant the role", RECORD_KEYS.heartbeat + " — the only thing the agent may write"],
+              ["Emit CapsuleMinted", "so an indexer sees the whole mint in one event"],
             ].map(([a, b]) => (
               <div key={a} style={{ padding: "11px 0" }}>
                 <div style={{ fontWeight: 700, fontSize: 14.5 }}>{a}</div>
@@ -760,13 +615,16 @@ function StepMint({ drafts, next }: { drafts: Draft[]; next: () => void }) {
           <button className="btn btn-primary btn-block" style={{ marginTop: 18 }} disabled={signing} onClick={() => setSigning(true)}>
             {signing ? "Minting…" : "Sign the mint"}
           </button>
+          <button className="btn btn-ghost btn-sm btn-block" style={{ marginTop: 10 }} disabled={signing} onClick={back}>
+            ← Back
+          </button>
         </div>
 
         <div className="panel flat" style={{ overflow: "hidden" }}>
           <div className="row" style={{ padding: "12px 18px", background: "var(--paper)", borderBottom: "3px solid var(--ink)" }}>
             <span className="label">ETH Sepolia</span>
             <span className="push mono hint" style={{ fontSize: 11.5 }}>
-              CapsuleMinter 0x9c31…04af
+              CapsuleMinter 0xe609…a362
             </span>
           </div>
           <pre className="term flush" style={{ minHeight: 236 }}>
@@ -786,15 +644,15 @@ function StepMint({ drafts, next }: { drafts: Draft[]; next: () => void }) {
   );
 }
 
-/* ---------------- 06 · live ---------------- */
+/* ---------------- 05 · live ---------------- */
 
 const BOOT = [
   "machine created · region ord",
   "pulling capsule/runner:latest",
-  "resolved NAME · 6 records",
-  "secrets cap_8f3d1a unsealed",
+  "resolved NAME · 9 records",
+  "prompt cap_8f3d1a unsealed · openclaw gateway up",
   "telegram bot online",
-  "first heartbeat written",
+  "beat-1 written · 47,639 gas",
 ];
 
 function StepLive({ drafts }: { drafts: Draft[] }) {
@@ -810,7 +668,7 @@ function StepLive({ drafts }: { drafts: Draft[] }) {
   return (
     <div className="panel pad-lg">
       <div className="stepline">
-        <span className="stepnum">06</span>
+        <span className="stepnum">05</span>
         <span className="tag mint">Provision</span>
       </div>
       <p className="stitle">{done ? "They are awake." : "Booting the runners"}</p>
@@ -848,7 +706,7 @@ function StepLive({ drafts }: { drafts: Draft[] }) {
             <pre className="term" style={{ fontSize: 11.5, minHeight: 150 }}>
               {BOOT.slice(0, n).map((l, k) => (
                 <span key={k} className={k === BOOT.length - 1 ? "g" : "d"}>
-                  {l.replace("NAME", d.slug + ".berkin.eth")}
+                  {l.replace("NAME", d.slug + "." + PARENT.name)}
                   {"\n"}
                 </span>
               ))}
@@ -863,8 +721,8 @@ function StepLive({ drafts }: { drafts: Draft[] }) {
           <span className="tag ink">Next</span>
           <p style={{ margin: 0 }}>
             Message the bot on Telegram and it already knows what it is — it read its own name. Change{" "}
-            <span className="mono">agent.prompt</span> in the record and it becomes a different agent within 30
-            seconds, with no redeploy.
+            <span className="mono">{RECORD_KEYS.prompt}</span> in the record and it becomes a different agent
+            within 30 seconds, with no redeploy.
           </p>
         </div>
       )}

@@ -5,7 +5,7 @@ import Link from "next/link";
 import AgentCard from "@/components/AgentCard";
 import ActivityFeed from "@/components/ActivityFeed";
 import RecallDialog from "@/components/RecallDialog";
-import { AGENTS, PARENT, usd, type Agent } from "@/lib/mock";
+import { AGENTS, PARENT, type Agent } from "@/lib/mock";
 
 export default function FleetPage() {
   const [recalled, setRecalled] = useState<string[]>([]);
@@ -20,9 +20,8 @@ export default function FleetPage() {
   const live = agents.filter((a) => a.status !== "recalled");
   const running = agents.filter((a) => a.status === "running");
   const booting = live.length - running.length;
-  const held = live.reduce((s, a) => s + a.balance, 0);
-  const net = live.reduce((s, a) => s + a.earned - a.spent, 0);
-  const calls = agents.reduce((s, a) => s + a.calls, 0);
+  const recalledCount = agents.length - live.length;
+  const beats = agents.reduce((s, a) => s + a.history.length, 0);
 
   const stats = [
     {
@@ -30,9 +29,9 @@ export default function FleetPage() {
       v: String(live.length),
       sub: running.length + " running" + (booting ? " · " + booting + " booting" : "") + " · " + agents.length + " minted",
     },
-    { k: "USDC held", v: usd(held), sub: "across every agent wallet" },
-    { k: "Net today", v: (net >= 0 ? "+" : "−") + usd(Math.abs(net)), sub: "earned minus spent, x402" },
-    { k: "Paid calls", v: String(calls), sub: "agent to agent, on Base" },
+    { k: "Beats written", v: String(beats), sub: "47,639 gas each, paid by the agent" },
+    { k: "Recalled", v: String(recalledCount), sub: "role pulled, subname kept" },
+    { k: "Parent", v: PARENT.name.replace(".eth", ""), sub: "one name, one kill switch" },
   ];
 
   return (
@@ -47,7 +46,7 @@ export default function FleetPage() {
               {PARENT.name} is running {running.length} agent{running.length === 1 ? "" : "s"}
             </h2>
             <p className="hint" style={{ marginTop: 6 }}>
-              Status comes from heartbeat writes on Sepolia. Balances come from the Base subgraph.
+              Status comes from heartbeat writes on ETH Sepolia, and the permission behind them.
             </p>
           </div>
           <Link href="/launch" className="btn btn-primary">

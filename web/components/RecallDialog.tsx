@@ -2,9 +2,10 @@
 
 import { useEffect, useRef, useState } from "react";
 import Capsule from "./Capsule";
+import { RECORD_KEYS } from "@/lib/capsule/records";
 import { fullName, type Agent } from "@/lib/mock";
 
-/* The master override. One call — revokeRoles() — and the agent's next
+/* The master override. One call — authorizeTextRoles(…, false) — and the next
    heartbeat write reverts with EACUnauthorizedAccountRoles. The runner
    reads that revert as its own stop signal. Nothing else is torn down. */
 
@@ -48,7 +49,7 @@ export default function RecallDialog({
             Master override
           </span>
           <span className="push mono" style={{ fontSize: 12 }}>
-            revokeRoles()
+            authorizeTextRoles()
           </span>
         </div>
 
@@ -84,7 +85,7 @@ export default function RecallDialog({
                 </div>
                 <div className="kv">
                   <span className="hint">Secrets</span>
-                  <b style={{ fontSize: 14 }}>wiped from the store</b>
+                  <b style={{ fontSize: 14 }}>kept — re-granting revives it</b>
                 </div>
                 <div className="kv">
                   <span className="hint">Machine</span>
@@ -124,11 +125,11 @@ export default function RecallDialog({
               <div className="label">Waiting on your wallet</div>
               <pre className="term">
                 <span className="d">→ </span>
-                <span className="w">CapsuleMinter.recall(</span>
+                <span className="w">PermissionedResolver.authorizeTextRoles(</span>
                 <span className="y">{name}</span>
                 <span className="w">)</span>
                 {"\n"}
-                <span className="d">  revokeRoles(resource, agent, ROLE_HEARTBEAT)</span>
+                <span className="d">  {RECORD_KEYS.heartbeat} · agent · false</span>
                 {"\n"}
                 <span className="d">  waiting for signature…</span>
                 <span className="caret" />
@@ -145,16 +146,16 @@ export default function RecallDialog({
                 <Capsule size={44} cap="#C4D5F6" shell="#E4EBFA" />
                 <div>
                   <h3>Role revoked</h3>
-                  <div className="hint mono">0x41d9…7c02 · block 7412903</div>
+                  <div className="hint mono">0x3f65…c9cc · block 11662640</div>
                 </div>
               </div>
               <pre className="term">
-                <span className="g">✓ revokeRoles</span> <span className="d">confirmed</span>
+                <span className="g">✓ authorizeTextRoles</span> <span className="d">confirmed</span>
                 {"\n"}
                 <span className="d">runner </span>
                 <span className="w">{name}</span>
                 {"\n"}
-                <span className="d">  setText(agent.heartbeat) → </span>
+                <span className="d">  setText({RECORD_KEYS.heartbeat}) → </span>
                 <span className="r">EACUnauthorizedAccountRoles</span>
                 {"\n"}
                 <span className="d">  permission gone — halting</span>

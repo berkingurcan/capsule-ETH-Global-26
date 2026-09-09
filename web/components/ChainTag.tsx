@@ -1,12 +1,10 @@
-import type { Chain } from "@/lib/mock";
+/* One chain. Names, roles and heartbeats all live on ETH Sepolia.
 
-/* Two chains, no bridge. Names live on ETH Sepolia; money settles on
-   Base Sepolia. Every row that came off a subgraph says which one. */
+   This used to branch on a `Chain` union because money settled on Base
+   Sepolia over x402. That was cut on 2026-09-08 (DECISIONS.md), and with
+   it the second chain — so the tag is now a constant, kept because every
+   row still says which chain it came off. */
 
-export default function ChainTag({ chain }: { chain: Chain }) {
-  return chain === "base" ? (
-    <span className="tag bubble">Base</span>
-  ) : (
-    <span className="tag">Sepolia</span>
-  );
+export default function ChainTag() {
+  return <span className="tag">Sepolia</span>;
 }

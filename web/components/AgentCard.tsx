@@ -4,7 +4,8 @@ import Link from "next/link";
 import Capsule from "./Capsule";
 import StatusPill from "./StatusPill";
 import Heartbeat from "./Heartbeat";
-import { fullName, usd, type Agent } from "@/lib/mock";
+import { RECORD_KEYS } from "@/lib/capsule/records";
+import { type Agent } from "@/lib/mock";
 
 export default function AgentCard({ agent, onRecall }: { agent: Agent; onRecall: (a: Agent) => void }) {
   const dead = agent.status === "recalled";
@@ -41,22 +42,21 @@ export default function AgentCard({ agent, onRecall }: { agent: Agent; onRecall:
 
       <div className="row" style={{ padding: "12px 20px", borderTop: "2px solid var(--line)", gap: 22 }}>
         <div>
-          <div className="label">Balance</div>
-          <div className="figure" style={{ fontSize: 16 }}>
-            {usd(agent.balance)} <span style={{ fontSize: 11, color: "var(--muted)" }}>USDC</span>
+          <div className="label">{RECORD_KEYS.prompt}</div>
+          <div className="mono" style={{ fontSize: 13, fontWeight: 700 }}>
+            {agent.promptRef}
           </div>
         </div>
         <div>
-          <div className="label">Net</div>
-          <div className="figure" style={{ fontSize: 16, color: agent.earned - agent.spent >= 0 ? "var(--mint-700)" : "var(--alarm)" }}>
-            {agent.earned - agent.spent >= 0 ? "+" : "−"}
-            {usd(Math.abs(agent.earned - agent.spent))}
+          <div className="label">{RECORD_KEYS.heartbeat}</div>
+          <div className="mono" style={{ fontSize: 13, fontWeight: 700 }}>
+            {agent.heartbeat === "" ? "—" : agent.heartbeat}
           </div>
         </div>
         <div>
-          <div className="label">Calls</div>
-          <div className="figure" style={{ fontSize: 16 }}>
-            {agent.calls}
+          <div className="label">{RECORD_KEYS.runtime}</div>
+          <div className="mono" style={{ fontSize: 13, fontWeight: 700 }}>
+            {agent.runtime}
           </div>
         </div>
       </div>
