@@ -312,7 +312,17 @@ export default function LaunchFlow({ taken, minter }: { taken: string[]; minter:
  * is read off the chain rather than asserted.
  */
 function StepWallet({ minter, next }: { minter: string | null; next: () => void }) {
-  const { status, address, chainOk, chainId, wallets, connect, switchChain, getPublicClient } = useWallet();
+  const {
+    status,
+    address,
+    chainOk,
+    chainId,
+    wallets,
+    connect,
+    switchChain,
+    error: walletError,
+    getPublicClient,
+  } = useWallet();
   const connected = status === "connected" && address !== null;
 
   const [roles, setRoles] = useState<"unknown" | "checking" | "ok" | "revoked">("unknown");
@@ -405,7 +415,7 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
               <button
                 className="btn btn-sm btn-primary"
                 disabled={status === "connecting"}
-                onClick={() => void connect(wallets.length === 1 ? wallets[0]!.info.rdns : undefined)}
+                onClick={() => void connect()}
               >
                 {status === "connecting" ? "Connecting…" : "Connect wallet"}
               </button>
@@ -444,6 +454,15 @@ function StepWallet({ minter, next }: { minter: string | null; next: () => void 
           </div>
         </div>
       </div>
+
+      {walletError !== null && (
+        <div className="notice" style={{ marginTop: 20, borderColor: "var(--alarm)", background: "#fff" }}>
+          <span className="tag ink" style={{ borderColor: "var(--alarm)", color: "var(--alarm)" }}>
+            Wallet
+          </span>
+          <p style={{ margin: 0, color: "var(--alarm)", fontSize: 13 }}>{walletError}</p>
+        </div>
+      )}
 
       {PARENT_NAME_MISSING && (
         <div className="notice" style={{ marginTop: 20, borderColor: "var(--line)" }}>

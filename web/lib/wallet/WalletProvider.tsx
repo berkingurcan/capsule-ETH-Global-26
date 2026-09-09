@@ -45,6 +45,7 @@ import {
   findWallet,
   getServerWallets,
   getWallets,
+  INJECTED_RDNS,
   subscribeWallets,
   type DiscoveredWallet,
   type Eip1193Provider,
@@ -162,13 +163,40 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
 
   const connect = useCallback(
     async (rdns?: string) => {
-      const target =
-        rdns !== undefined ? findWallet(rdns) : wallets.length === 1 ? wallets[0] : undefined;
+      let target = rdns !== undefined ? findWallet(rdns) : undefined;
+      if (!target) {
+        if (wallets.length === 1) {
+          target = wallets[0];
+        } else if (wallets.length > 1) {
+          // Prefer MetaMask if available, otherwise first wallet
+          target =
+            wallets.find(
+              (w) =>
+                w.info.rdns === "io.metamask" ||
+                w.info.name.toLowerCase().includes("metamask"),
+            ) ?? wallets[0];
+        }
+      }
+
+      if (!target && typeof window !== "undefined") {
+        const injected = (window as { ethereum?: Eip1193Provider & { isMetaMask?: boolean } }).ethereum;
+        if (injected) {
+          target = {
+            info: {
+              uuid: INJECTED_RDNS,
+              name: injected.isMetaMask ? "MetaMask" : "Browser wallet",
+              icon: "",
+              rdns: injected.isMetaMask ? "io.metamask" : INJECTED_RDNS,
+            },
+            provider: injected,
+          };
+        }
+      }
 
       if (target === undefined) {
         setError(
           wallets.length === 0
-            ? "No Ethereum wallet found in this browser."
+            ? "No Ethereum wallet found. Please install or enable MetaMask."
             : "Pick which wallet to connect.",
         );
         return;
@@ -203,15 +231,36 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
   }, [clear]);
 
   const switchChain = useCallback(async () => {
-    const provider = providerRef.current;
-    if (provider === null) return;
+    const provider =
+      providerRef.current ??
+      (typeof window !== "undefined"
+        ? (window as { ethereum?: Eip1193Provider }).ethereum
+        : null);
+    if (provider === null || provider === undefined) return;
     const hexId = `0x${CHAIN.id.toString(16)}`;
     setError(null);
     try {
       await provider.request({ method: "wallet_switchEthereumChain", params: [{ chainId: hexId }] });
     } catch (e) {
-      // 4902: the wallet has never heard of this chain. Offer to add it.
       const code = (e as { code?: number }).code;
+
+      // Sepolia (chain 11155111 / 0xaa36a7) is a default testnet in MetaMask.
+      // Calling wallet_addEthereumChain for Sepolia causes MetaMask (v13.46+)
+      // to crash with: "Cannot read properties of undefined (reading 'origin')"
+      // because Sepolia cannot be added as a custom network.
+      // Instead, instruct the user to toggle "Show test networks" in MetaMask.
+      if (CHAIN.id === 11155111) {
+        if (code === 4902) {
+          setError(
+            "Sepolia is not enabled in MetaMask. Open MetaMask, click the network dropdown (top-left), toggle 'Show test networks' ON, and select Sepolia.",
+          );
+        } else {
+          setError(readable(e));
+        }
+        return;
+      }
+
+      // 4902: the wallet has never heard of this chain. Offer to add it.
       if (code !== 4902) {
         setError(readable(e));
         return;
@@ -225,7 +274,9 @@ export function WalletProvider({ children }: { children: React.ReactNode }) {
               chainName: CHAIN.name,
               nativeCurrency: CHAIN.nativeCurrency,
               rpcUrls: [CHAIN.rpcUrls.default.http[0]],
-              blockExplorerUrls: [CHAIN.blockExplorers.default.url],
+              blockExplorerUrls: CHAIN.blockExplorers?.default?.url
+                ? [CHAIN.blockExplorers.default.url]
+                : [],
             },
           ],
         });
