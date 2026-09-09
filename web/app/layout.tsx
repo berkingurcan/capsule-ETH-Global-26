@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Nav from "@/components/Nav";
+import { WalletProvider } from "@/lib/wallet/WalletProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
@@ -20,8 +21,10 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         />
       </head>
       <body>
-        <Nav />
-        {children}
+        <WalletProvider>
+          <Nav />
+          {children}
+        </WalletProvider>
         <footer className="b-ink" style={{ padding: "34px 0", borderTop: "3px solid var(--ink)" }}>
           <div className="wrap row wrapflex" style={{ gap: 16 }}>
             <span className="mono" style={{ fontSize: 12, color: "var(--vend-300)" }}>

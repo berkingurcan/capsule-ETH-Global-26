@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Capsule from "@/components/Capsule";
+import { CHAIN } from "@/lib/capsule/chain";
 import { RECORD_KEYS } from "@/lib/capsule/records";
+import { shortAddress, useWallet } from "@/lib/wallet/WalletProvider";
 import { PARENT, ROLES, type Role } from "@/lib/mock";
 import {
   PROVIDERS,
@@ -175,11 +177,19 @@ export default function LaunchPage() {
 /* ---------------- 01 · parent ---------------- */
 
 function StepParent({ next }: { next: () => void }) {
-  const checks = [
-    ["You own it", "ETHRegistry says 0x7a1c…9e40"],
-    ["Subregistry is live", "deployed by the Verifiable Factory"],
-    ["Resolver is set", "PermissionedResolver, EAC enabled"],
-    ["Capsule can write below it", "admin role on the subregistry only"],
+  const { status, address, chainOk, chainId, wallets, connect, switchChain } = useWallet();
+  const connected = status === "connected" && address !== null;
+  const ready = connected && chainOk;
+
+  /* These are real preconditions for a mint, and none of them is checked yet —
+     verifying them needs the chain reads that land with the mint wiring. They
+     are listed as pending rather than ticked, because a green tick this screen
+     did not earn is the exact bug the rest of this page was just cleaned of. */
+  const checks: [string, string, boolean][] = [
+    ["A wallet is connected", address ?? "no account", connected],
+    ["It is on " + CHAIN.name, chainOk ? "chain " + CHAIN.id : "chain " + (chainId ?? "?"), chainOk],
+    ["You own " + PARENT.name, "checked at mint, against ETHRegistry", false],
+    ["Capsule can write below it", "the minter holds root roles on the resolver", false],
   ];
 
   return (
@@ -196,22 +206,39 @@ function StepParent({ next }: { next: () => void }) {
 
       <div className="grid g-side" style={{ alignItems: "stretch" }}>
         <div className="tile shell" style={{ display: "flex", alignItems: "center", gap: 20, flexWrap: "wrap" }}>
-          <Capsule size={64} cap="#1B4FD8" />
+          <Capsule size={64} cap={ready ? "#1B4FD8" : "#C4D5F6"} />
           <div style={{ minWidth: 0 }}>
             <div className="ensname" style={{ fontSize: 24 }}>
               {PARENT.name}
             </div>
             <div className="mono" style={{ fontSize: 12.5, color: "var(--muted)", marginTop: 4 }}>
-              0x7a1c…9e40 · owner
+              {connected ? shortAddress(address) + " · connected" : "no wallet connected"}
             </div>
             <div className="row wrapflex" style={{ gap: 7, marginTop: 12 }}>
               <span className="tag">ENSv2 registry</span>
-              <span className="tag">Sepolia</span>
+              <span className="tag">{CHAIN.name}</span>
             </div>
           </div>
-          <span className="pill run push">
-            <span className="led" />
-            Verified
+
+          <span className="push">
+            {ready ? (
+              <span className="pill run">
+                <span className="led" />
+                Connected
+              </span>
+            ) : connected ? (
+              <button className="btn btn-sm btn-danger" onClick={() => void switchChain()}>
+                Switch to {CHAIN.name}
+              </button>
+            ) : (
+              <button
+                className="btn btn-sm btn-primary"
+                disabled={status === "connecting"}
+                onClick={() => void connect(wallets.length === 1 ? wallets[0]!.info.rdns : undefined)}
+              >
+                {status === "connecting" ? "Connecting…" : "Connect wallet"}
+              </button>
+            )}
           </span>
         </div>
 
@@ -220,14 +247,24 @@ function StepParent({ next }: { next: () => void }) {
             What Capsule checked
           </div>
           <div className="stack">
-            {checks.map(([a, b]) => (
+            {checks.map(([a, b, done]) => (
               <div key={a} className="row-top" style={{ gap: 10, padding: "10px 0" }}>
-                <span className="check on" style={{ width: 20, height: 20, borderWidth: 2.5, fontSize: 11, background: "var(--mint)" }}>
-                  ✓
+                <span
+                  className={"check" + (done ? " on" : "")}
+                  style={{
+                    width: 20,
+                    height: 20,
+                    borderWidth: 2.5,
+                    fontSize: 11,
+                    background: done ? "var(--mint)" : "transparent",
+                    color: done ? "var(--ink)" : "var(--muted)",
+                  }}
+                >
+                  {done ? "✓" : "·"}
                 </span>
-                <div>
-                  <div style={{ fontSize: 14, fontWeight: 600 }}>{a}</div>
-                  <div className="hint mono" style={{ fontSize: 11.5 }}>
+                <div style={{ minWidth: 0 }}>
+                  <div style={{ fontSize: 14, fontWeight: 600, color: done ? "var(--ink)" : "var(--muted)" }}>{a}</div>
+                  <div className="hint mono" style={{ fontSize: 11.5, wordBreak: "break-all" }}>
                     {b}
                   </div>
                 </div>
@@ -238,8 +275,10 @@ function StepParent({ next }: { next: () => void }) {
       </div>
 
       <div className="row" style={{ marginTop: 26, gap: 10 }}>
-        <button className="btn btn-ghost btn-sm">Use a different name</button>
-        <button className="btn btn-primary push" onClick={next}>
+        <span className="hint">
+          {ready ? "Ready." : connected ? "Wrong network." : "Connect a wallet to continue."}
+        </span>
+        <button className="btn btn-primary push" onClick={next} disabled={!ready}>
           Pick roles →
         </button>
       </div>

@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Capsule from "./Capsule";
-import { PARENT } from "@/lib/mock";
+import ConnectButton from "./ConnectButton";
 
 const LINKS = [
   { href: "/launch", label: "Launch" },
@@ -34,15 +34,15 @@ export default function Nav() {
             ))}
           </div>
 
-          <span className="tag sun" style={{ marginLeft: "auto" }} title="Nothing here touches a chain or a wallet">
-            Demo · mock data
+          <span
+            className="tag sun"
+            style={{ marginLeft: "auto" }}
+            title="The wallet is real. The fleet below is still mock data."
+          >
+            Mock fleet
           </span>
 
-          <div className="wallet" title="Connected parent name">
-            <span className="dot" />
-            <span>{PARENT.name}</span>
-            <span style={{ opacity: 0.6 }}>0x7a1c…9e40</span>
-          </div>
+          <ConnectButton />
         </div>
       </nav>
 
