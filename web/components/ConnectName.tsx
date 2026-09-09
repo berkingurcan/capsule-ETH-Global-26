@@ -3,24 +3,33 @@
 /* ------------------------------------------------------------------
    Bring your own name.
 
-   Four checks, four buttons, in the order the chain requires them. The page is
+   Six checks, six buttons, in the order the chain requires them. The page is
    deliberately a checklist rather than a wizard: every row is a fact read off
    Sepolia, and the button next to a row is the transaction that makes that fact
    true. Reload it at any point and it shows where you actually are, because it
    never remembers anything — `readParentStatus` is the only source of truth on
    the screen.
 
-   That matters more here than on the launch form. Connecting is four
+   That matters more here than on the launch form. Connecting is up to six
    transactions from a wallet that may be interrupted between any two of them,
    and a wizard holding step state in React would happily ask someone to deploy a
    second resolver because it forgot they had one.
 
-   The one step this page cannot perform is the first, and it says so: a `.eth`
-   name on the ENSv2 beta has no subregistry until its owner deploys one, and
-   that is an ENS operation, not a Capsule one.
+   The first two steps are the subregistry, and they used to be an apology. A
+   `.eth` name on this deployment has none, nothing can create a subname under it
+   until it does, and the page's advice was to go and do it in ENS's own manager
+   app — which turns out not to offer the operation either. So the advice could
+   not be followed, and a name bought through /register had nowhere to go at all.
+   Now the page does it: deploy a `PermissionedRegistry`, then link it to the name
+   in both directions.
+
+   The exception the page still cannot resolve is a wallet that does not own the
+   name. `ROLE_SET_SUBREGISTRY` goes to whoever registered it, so for anyone else
+   this is not a missing button but a missing permission, and the page says which
+   wallet to come back with instead of offering a transaction that would revert.
    ------------------------------------------------------------------ */
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { Address } from "viem";
 import Capsule from "@/components/Capsule";
@@ -28,7 +37,10 @@ import { CHAIN } from "@/lib/capsule/chain";
 import {
   ConnectError,
   connectParent,
+  attachSubregistry,
   deployResolver,
+  deploySubregistry,
+  linkSubregistryParent,
   grantRegistrar,
   grantResolverRoles,
   setParentOpen,
@@ -42,16 +54,20 @@ import {
 import { shortAddress, useWallet } from "@/lib/wallet/WalletProvider";
 import { shortHex, txUrl } from "@/lib/format";
 
-/** Where a user without a subregistry has to go. The hackathon deployment's own app. */
-const ENS_MANAGER = "https://hackathon-deployment-manager-app-v4.ens-cf.workers.dev/";
 
 type Busy = null | { step: string; detail?: string };
 
-export default function ConnectName({ minter }: { minter: string | null }) {
+export default function ConnectName({
+  minter,
+  initialName = "",
+}: {
+  minter: string | null;
+  initialName?: string;
+}) {
   const { address, chainOk, status, getWalletClient, getPublicClient, switchChain } = useWallet();
   const connected = status === "connected" && address !== null;
 
-  const [raw, setRaw] = useState("");
+  const [raw, setRaw] = useState(initialName.trim().toLowerCase());
   const [checked, setChecked] = useState<ParentStatus | null>(null);
   const [reading, setReading] = useState(false);
   const [busy, setBusy] = useState<Busy>(null);
@@ -60,6 +76,15 @@ export default function ConnectName({ minter }: { minter: string | null }) {
   const [open, setOpen] = useState(false);
   /** The resolver this session deployed, or one the user pasted after a reload. */
   const [freshResolver, setFreshResolver] = useState<Address | null>(null);
+  /* The registry deployed in this session, before ENS has been told about it.
+
+     Unlike the resolver, whose address is deterministic in (factory, wallet,
+     salt) and so can be recovered by redeploying, a registry is a plain CREATE
+     deployment: its address depends on the sender's nonce and is gone the moment
+     this state is. That is five million gas at stake, which is why the field
+     below is editable — a reloaded user can paste the address from their wallet
+     history instead of paying twice. */
+  const [freshRegistry, setFreshRegistry] = useState<Address | null>(null);
 
   const problems = raw.trim() === "" ? [] : parentNameProblems(raw);
   const nameOk = raw.trim() !== "" && problems.length === 0;
@@ -100,6 +125,17 @@ export default function ConnectName({ minter }: { minter: string | null }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [address]);
 
+  /* A name arriving from /register was bought seconds ago, so the visitor should
+     land on its checklist rather than on an empty form. Fires once, as soon as
+     there is a wallet to read with. */
+  const prefilled = useRef(false);
+  useEffect(() => {
+    if (prefilled.current || initialName === "" || !connected || !chainOk || minter === null) return;
+    if (parentNameProblems(initialName).length > 0) return;
+    prefilled.current = true;
+    void refresh();
+  }, [initialName, connected, chainOk, minter, refresh]);
+
   const run = useCallback(
     async (label: string, fn: (clients: { walletClient: never; publicClient: never }) => Promise<void>) => {
       const walletClient = getWalletClient();
@@ -135,6 +171,57 @@ export default function ConnectName({ minter }: { minter: string | null }) {
       );
       setFreshResolver(resolver);
       say(`resolver deployed at ${shortAddress(resolver)}`, hash);
+    });
+
+  /* ---------------- the subregistry, in two signatures ----------------
+
+     Split the way the chain splits it. Deploying costs five million gas and
+     attaching costs forty thousand, so a user who is interrupted between them
+     must not be asked to pay for the deploy again — which means the address of
+     the registry they just deployed has to survive, and `freshRegistry` holds
+     it exactly as `freshResolver` holds the resolver's.
+
+     The third transaction, `setParent`, is folded into the second: they are the
+     two halves of one link, and there is no state between them worth resuming
+     into. Leaving a registry attached but unparented is the failure mode this
+     whole flow exists to avoid, so the button that creates that state also
+     leaves it. */
+  const onDeploySubregistry = () =>
+    run("Deploying subregistry", async ({ walletClient, publicClient }) => {
+      const { hash, registry } = await deploySubregistry(
+        { walletClient, publicClient, owner: address as Address },
+        phase("Deploying subregistry"),
+      );
+      setFreshRegistry(registry);
+      say(`subregistry deployed at ${shortAddress(registry)}`, hash);
+    });
+
+  const onLinkSubregistry = () =>
+    run("Linking subregistry", async ({ walletClient, publicClient }) => {
+      const registry = registryToLink;
+      if (registry === null) {
+        setError("deploy a subregistry first, or paste the address of one you already have");
+        return;
+      }
+      if (checked?.tokenId == null) {
+        setError("this name has no token id on ENS — re-check it and try again");
+        return;
+      }
+      /* Attach first, then point back. In this order a failure leaves the name
+         with a registry that /connect will offer to finish linking; in the other
+         order it leaves an orphan registry pointing at a name that has never
+         heard of it, which reads as nothing having happened at all. */
+      if (checked.registry === null) {
+        await attachSubregistry(
+          { walletClient, publicClient, tokenId: checked.tokenId, registry },
+          phase("Linking subregistry · 1 of 2"),
+        );
+      }
+      const hash = await linkSubregistryParent(
+        { walletClient, publicClient, registry, label: checked.parent.label },
+        phase("Linking subregistry · 2 of 2"),
+      );
+      say(`${checked.parent.name} can now issue subnames`, hash);
     });
 
   const onGrantRegistrar = () =>
@@ -203,7 +290,20 @@ export default function ConnectName({ minter }: { minter: string | null }) {
     });
 
   const zero = "0x0000000000000000000000000000000000000000";
-  const hasSubregistry = checked !== null && checked.registry !== null;
+  /* "Has a subregistry" means both halves of the link, not one. A registry that
+     is attached but has never been told its parent passes every visible test —
+     the name has a subregistry, subnames resolve downward — and then fails every
+     record write, because resolver authorization walks upward. Treating the
+     half-linked state as done is precisely the bug this flow exists to prevent,
+     so the flag that gates the rest of the checklist requires both. */
+  const linkedSubregistry = checked !== null && checked.registry !== null && checked.parentLinked;
+  const hasSubregistry = linkedSubregistry;
+
+  /** The registry the link step will use: whatever ENS already has, else this session's. */
+  const registryToLink: Address | null = (checked?.registry as Address | null) ?? freshRegistry;
+  /* Whether the deploy has been paid for, whether or not ENS knows yet. */
+  const deployedRegistry = registryToLink !== null;
+  const mayFixSubregistry = checked?.callerMaySetSubregistry === true;
 
   /* Which resolver the two grants and the connect will point at.
 
@@ -236,6 +336,11 @@ export default function ConnectName({ minter }: { minter: string | null }) {
           and every agent you launch lands under that name — <span className="mono">dev.yourname.eth</span>,{" "}
           <span className="mono">trader.yourname.eth</span>. Connecting grants two ENS roles you can revoke at any
           time; Capsule never holds your name.
+        </p>
+        <p className="hint" style={{ marginTop: -6 }}>
+          Don&rsquo;t own one on this deployment yet?{" "}
+          <Link href="/register">Register a name</Link> — it takes two transactions and the beta&rsquo;s test token
+          is free to mint.
         </p>
 
         <div className="field" style={{ maxWidth: 460 }}>
@@ -314,32 +419,121 @@ export default function ConnectName({ minter }: { minter: string | null }) {
             transaction that makes the fact true.
           </p>
 
-          {/* --- 0. the subregistry, which this page cannot create --- */}
+          {/* --- 0. does the name exist at all ---
+
+               Before anything about permissions. Someone who has not registered
+               a name is not stuck, they are simply early, and the whole panel
+               below would tell them about roles they cannot grant on a name they
+               do not own. The label carries across so /register opens on the
+               name they already typed here. */}
+          {!checked.registered ? (
+            <div className="notice" style={{ marginTop: 14, borderColor: "var(--sun-700, var(--line))" }}>
+              <strong>Nobody owns {checked.parent.name} yet.</strong>
+              <p className="hint" style={{ marginTop: 6 }}>
+                It is not registered on this deployment, so there is nothing to connect. Names here are bought from
+                ENS&rsquo;s own registrar for about 8 USDC a year — Capsule takes no part of that and never holds
+                the name.
+              </p>
+              <div className="row" style={{ gap: 10, marginTop: 12 }}>
+                <Link
+                  className="btn btn-sm btn-primary"
+                  href={`/register?label=${encodeURIComponent(checked.parent.label)}`}
+                >
+                  Register {checked.parent.name}
+                </Link>
+                <button className="btn btn-sm btn-ghost" onClick={() => void refresh()} disabled={reading}>
+                  {reading ? "Checking…" : "I have just registered it"}
+                </button>
+              </div>
+            </div>
+          ) : (
+          <>
+          {/* --- 1. the subregistry: deploy it, then link it both ways --- */}
           <Row
-            done={hasSubregistry}
+            done={deployedRegistry}
             title="Has a subregistry"
             detail={
-              hasSubregistry
-                ? `${shortAddress(checked.registry as Address)} issues this name's subnames`
-                : "this name cannot issue subnames to anyone yet"
+              deployedRegistry
+                ? `${shortAddress(registryToLink as Address)} will issue this name's subnames`
+                : "a name on this deployment gets none by default"
             }
           >
-            {!hasSubregistry && (
-              <a className="btn btn-sm btn-sun" href={ENS_MANAGER} target="_blank" rel="noreferrer">
-                Open the ENS manager
-              </a>
+            {!deployedRegistry && mayFixSubregistry && (
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={onDeploySubregistry}
+                disabled={busy !== null}
+              >
+                Deploy one
+              </button>
             )}
           </Row>
 
-          {!hasSubregistry && (
-            <div className="notice" style={{ marginTop: 14 }}>
-              <strong>This one step is ENS&rsquo;s, not ours.</strong>
+          {deployedRegistry && !linkedSubregistry && (
+            <Row
+              done={false}
+              title="Linked to the name"
+              detail="ENS has to agree in both directions before subnames work"
+            >
+              <button
+                className="btn btn-sm btn-primary"
+                onClick={onLinkSubregistry}
+                disabled={busy !== null}
+              >
+                {checked.registry === null ? "Link it (2 signatures)" : "Finish linking"}
+              </button>
+            </Row>
+          )}
+
+          {!hasSubregistry && !mayFixSubregistry && (
+            <div className="notice" style={{ marginTop: 14, borderColor: "var(--alarm)" }}>
+              <strong>This wallet cannot give {checked.parent.name} a subregistry.</strong>
               <p className="hint" style={{ marginTop: 6 }}>
-                A name registered on the ENSv2 beta has no subregistry until its owner deploys one and links it in
-                both directions. Until that exists, nothing can create <span className="mono">{`x.${checked.parent.name}`}</span>{" "}
-                — not Capsule, not the ENS app, not you. Create the subregistry in the ENS manager, then come back
-                and check the name again.
+                ENS grants that permission to whoever registered the name. Connect with the wallet that bought{" "}
+                <span className="mono">{checked.parent.name}</span>, or ask them to run this step — it is two
+                signatures and they keep full control of the result.
               </p>
+            </div>
+          )}
+
+          {!hasSubregistry && mayFixSubregistry && (
+            <div className="notice" style={{ marginTop: 14 }}>
+              <strong>
+                {deployedRegistry
+                  ? "One step left before this name can issue subnames."
+                  : "A name on this deployment cannot issue subnames until it has a registry of its own."}
+              </strong>
+              <p className="hint" style={{ marginTop: 6 }}>
+                Nothing can create <span className="mono">{`x.${checked.parent.name}`}</span> — not Capsule, not you
+                — until a <span className="mono">PermissionedRegistry</span> exists and ENS and it point at each
+                other. The registry is yours outright: you are its only admin, Capsule gets one revocable role on it
+                further down this page, and it keeps working if you never finish.
+              </p>
+              <p className="hint" style={{ marginTop: 8 }}>
+                {deployedRegistry
+                  ? "The contract is already deployed. What is left is the link itself, which is cheap."
+                  : "The deployment is the expensive part of connecting — roughly five million gas, once, ever."}
+              </p>
+              {deployedRegistry && checked.registry === null && (
+                <label className="field" style={{ marginTop: 10 }}>
+                  <span className="flabel">Subregistry address</span>
+                  <input
+                    className="input mono"
+                    value={freshRegistry ?? ""}
+                    onChange={(e) => setFreshRegistry((e.target.value.trim() || null) as Address | null)}
+                    spellCheck={false}
+                  />
+                  {/* Editable because a plain CREATE address cannot be recovered
+                      by redeploying, unlike the resolver proxy's. Someone who
+                      reloaded between the two steps has already paid for this
+                      contract; pasting it from their wallet history is much
+                      better than buying a second one. */}
+                  <span className="hint">
+                    Deployed but not yet linked. If you reloaded the page, paste the address from your wallet
+                    history rather than deploying again.
+                  </span>
+                </label>
+              )}
             </div>
           )}
 
@@ -480,6 +674,9 @@ export default function ConnectName({ minter }: { minter: string | null }) {
                 </div>
               )}
             </>
+          )}
+
+          </>
           )}
 
           {busy !== null && (

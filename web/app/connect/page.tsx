@@ -13,7 +13,16 @@ import { loadServerEnv } from "@/lib/capsule/env";
    `undefined`. */
 export const dynamic = "force-dynamic";
 
-export default async function ConnectPage() {
+export default async function ConnectPage({
+  searchParams,
+}: {
+  /* `?name=` is where /register sends someone who has just bought a name, so the
+     checklist opens on it instead of asking them to type what they just paid
+     for. A default for the field only — everything on the page is still read
+     from the chain before any transaction is offered. */
+  searchParams: Promise<{ name?: string }>;
+}) {
+  const { name } = await searchParams;
   let minter: string | null = null;
   try {
     minter = loadServerEnv().minterAddress;
@@ -23,7 +32,7 @@ export default async function ConnectPage() {
 
   return (
     <div className="page wrap">
-      <ConnectName minter={minter} />
+      <ConnectName minter={minter} initialName={name ?? ""} />
     </div>
   );
 }

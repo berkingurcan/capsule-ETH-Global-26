@@ -122,6 +122,25 @@ function start() {
   }, 1000);
 }
 
+/**
+ * Asks again, on demand.
+ *
+ * `start()` broadcasts three times over the first second of the page's life,
+ * which covers a wallet that injects late but not a user who enabled or
+ * unlocked one after the page had settled. Since the alternative is telling
+ * somebody to install the extension they are looking at, the connect button
+ * re-asks on click.
+ *
+ * Cheap and idempotent: the announce handler dedupes by rdns, so re-asking a
+ * wallet that already answered changes nothing and notifies nobody.
+ */
+export function refreshWallets(): void {
+  if (typeof window === "undefined") return;
+  start();
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+  addInjectedFallback();
+}
+
 export function subscribeWallets(listener: () => void): () => void {
   start();
   listeners.add(listener);

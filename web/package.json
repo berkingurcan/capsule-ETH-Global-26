@@ -20,7 +20,10 @@
     "check:prepare": "node --env-file=.env.local --import tsx scripts/check-prepare.ts",
     "check:mint": "node --env-file=.env.local --import tsx scripts/check-mint.ts",
     "check:recall": "node --env-file=.env.local --import tsx scripts/check-recall.ts",
-    "check:provision": "node --env-file=.env.local --import tsx scripts/check-provision.ts"
+    "check:provision": "node --env-file=.env.local --import tsx scripts/check-provision.ts",
+    "check:register": "node --env-file=.env.local --import tsx scripts/check-register.ts",
+    "fork:register": "node --import tsx scripts/fork-register.ts",
+    "fork:subregistry": "node --import tsx scripts/fork-subregistry.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

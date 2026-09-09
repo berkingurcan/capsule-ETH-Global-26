@@ -129,11 +129,23 @@ Three things, and only the last two are Capsule's:
 
 1. **A subregistry.** A `.eth` name on this deployment has none —
    `ETHRegistry.getSubregistry("berkin")` is the zero address — and until it has one,
-   nothing can create `x.berkin.eth` by any means. Deploying and linking one is gotcha 1
-   below; the web app detects this state, names it, and sends the user to the ENS manager
-   rather than shipping a second implementation of it that can be wrong in a new way.
+   nothing can create `x.berkin.eth` by any means. `/connect` now deploys and links one:
+   a `PermissionedRegistry` (~5.3M gas) followed by both halves of gotcha 1's link.
+
+   This was left to the ENS manager app for a while, on the theory that it was ENS's
+   primitive to get right. That was wrong on the facts — the manager does not offer the
+   operation either, and of the last thousand `NameRegistered` events on this deployment
+   **zero** set a subregistry — so the advice could not be followed and a freshly bought
+   name had nowhere to go. `web/lib/capsule/registry-bytecode.ts` vendors ENS's own
+   compiled bytecode; `npm run fork:subregistry` proves the runtime code it deploys is
+   byte-identical to the registry already live under `capsulefleet.eth`.
 2. **A `PermissionedResolver`.** `/connect` deploys one through `VerifiableFactory`.
 3. **The two grants and `connectParent`.** `/connect` sends all three.
+
+`ROLE_SET_SUBREGISTRY` (`1 << 20`) and its admin bit are granted to the buyer by the
+registrar at registration, scoped to the name's own token id — so step 1 is something the
+owner can do from a browser, and only the owner. `/connect` reads that role before
+offering the step.
 
 ## Gotchas that cost us time
 

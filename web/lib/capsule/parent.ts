@@ -31,9 +31,12 @@ import { zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { namehash, normalize, packetToBytes } from "viem/ens";
 import { toHex } from "viem";
 import {
+  ETH_REGISTRAR,
   ETH_REGISTRY,
   ROLE_REGISTRAR,
   ROLE_REGISTRAR_ADMIN,
+  ROLE_SET_SUBREGISTRY,
+  ethRegistrarAbi,
   minterAbi,
   registryAbi,
 } from "./chain";
@@ -111,9 +114,9 @@ export function encodeParent(raw: string): ParentName {
  *
  * Null is a real and common answer, not an error: a freshly registered `.eth`
  * name has no subregistry until its owner deploys one, and until then nobody
- * can mint anything under it — not this app, not the ENS manager. It is the one
- * setup step /connect cannot perform on the user's behalf, so it is reported
- * distinctly rather than folded into "not ready".
+ * can mint anything under it. It is reported distinctly rather than folded into
+ * "not ready" because it is the only blocker with a different actor — every
+ * other step on /connect is a grant, and this one is a deployment.
  */
 export async function readParentRegistry(
   client: PublicClient,
@@ -138,8 +141,52 @@ export async function readParentRegistry(
  */
 export type ParentStatus = {
   parent: ParentName;
+  /**
+   * Whether the name exists at all.
+   *
+   * Kept separate from `registry` because the two failures look identical on a
+   * checklist and are nothing alike: a name nobody has bought is one purchase
+   * away from working, and a name with no subregistry is a dead end its owner
+   * has to dig out of. Collapsing them tells someone who simply has not
+   * registered yet that their name has a permissions problem.
+   *
+   * Read from the registrar's `isAvailable`, which is also what decides whether
+   * /register would accept it, so the two pages cannot disagree about whether a
+   * name is free.
+   */
+  registered: boolean;
   /** Null when the name has no subregistry — nothing else can be true yet. */
   registry: Address | null;
+  /**
+   * The name's ERC-1155 token id on `ETH_REGISTRY`, or null if it is not
+   * registered.
+   *
+   * Needed because `setSubregistry` is gated per token rather than per name: the
+   * role the registrar granted the owner is scoped to this id, so both the
+   * permission check below and the transaction itself are addressed by it.
+   */
+  tokenId: bigint | null;
+  /**
+   * Whether this account may give the name a subregistry.
+   *
+   * The registrar grants `ROLE_SET_SUBREGISTRY` to the buyer at registration, so
+   * for the owner this is true and for everyone else it is false — which is the
+   * difference between "you have one step left" and "ask whoever owns this name
+   * to do it", and those are not the same page.
+   */
+  callerMaySetSubregistry: boolean;
+  /**
+   * Whether the registry points back at this name.
+   *
+   * The child -> parent half of the link, read from the registry's own
+   * `getParent`. Tracked separately from `registry` because a registry that is
+   * attached but has never been told its parent looks completely wired — the
+   * name has a subregistry, subnames resolve — and then fails every record write
+   * with an error that blames the resolver. A connect interrupted between the
+   * two transactions lands here, so it is a state to detect and finish, not an
+   * anomaly.
+   */
+  parentLinked: boolean;
   /** `connectParent` has been called for this registry. */
   connected: boolean;
   /** The minter holds `ROLE_REGISTRAR` on the registry. */
@@ -173,12 +220,52 @@ export async function readParentStatus(
   parent: ParentName,
   account: Address,
 ): Promise<ParentStatus> {
-  const registry = await readParentRegistry(client, parent);
+  const [registry, available, tokenId] = await Promise.all([
+    readParentRegistry(client, parent),
+    client.readContract({
+      address: ETH_REGISTRAR,
+      abi: ethRegistrarAbi,
+      functionName: "isAvailable",
+      args: [parent.label],
+    }),
+    /* Unregistered names have no token, and `findTokenId` reverts rather than
+       answering zero, so this is allowed to fail. The null it produces is what
+       `registered: false` means further down. */
+    client
+      .readContract({
+        address: ETH_REGISTRY,
+        abi: registryAbi,
+        functionName: "findTokenId",
+        args: [parent.label],
+      })
+      .catch(() => null),
+  ]);
+  const registered = !available;
 
   if (registry === null) {
+    /* No registry yet, so there is nothing to ask about roles ON it. The one
+       question still worth answering is whether this account could create one,
+       because that decides whether /connect offers the step or explains that
+       somebody else has to take it. */
+    const callerMaySetSubregistry =
+      tokenId === null
+        ? false
+        : await client
+            .readContract({
+              address: ETH_REGISTRY,
+              abi: registryAbi,
+              functionName: "hasRoles",
+              args: [tokenId, ROLE_SET_SUBREGISTRY, account],
+            })
+            .catch(() => false);
+
     return {
       parent,
+      registered,
       registry: null,
+      tokenId,
+      callerMaySetSubregistry,
+      parentLinked: false,
       connected: false,
       registrarGranted: false,
       resolverRolesGranted: false,
@@ -190,7 +277,7 @@ export async function readParentStatus(
     };
   }
 
-  const [readiness, stored, callerIsAdmin] = await Promise.all([
+  const [readiness, stored, callerIsAdmin, linked, callerMaySetSubregistry] = await Promise.all([
     client.readContract({
       address: minter,
       abi: minterAbi,
@@ -209,14 +296,41 @@ export async function readParentStatus(
       functionName: "hasRoles",
       args: [0n, ROLE_REGISTRAR_ADMIN, account],
     }),
+    /* The upward half of the link, read from the registry rather than inferred
+       from the downward half. They are set by two different transactions to two
+       different contracts and can disagree. */
+    client
+      .readContract({ address: registry, abi: registryAbi, functionName: "getParent" })
+      .catch(() => null),
+    tokenId === null
+      ? Promise.resolve(false)
+      : client
+          .readContract({
+            address: ETH_REGISTRY,
+            abi: registryAbi,
+            functionName: "hasRoles",
+            args: [tokenId, ROLE_SET_SUBREGISTRY, account],
+          })
+          .catch(() => false),
   ]);
+
+  /* Both fields have to match. A registry pointed at the right contract under
+     the wrong label resolves upward to a name that is not this one. */
+  const parentLinked =
+    linked !== null &&
+    linked[0].toLowerCase() === ETH_REGISTRY.toLowerCase() &&
+    linked[1] === parent.label;
 
   const [connected, registrarGranted, resolverRolesGranted, open, callerMayMint] = readiness;
   const [, , resolver, node] = stored;
 
   return {
     parent,
+    registered,
     registry,
+    tokenId,
+    callerMaySetSubregistry,
+    parentLinked,
     connected,
     registrarGranted,
     resolverRolesGranted,
@@ -236,8 +350,14 @@ export async function readParentStatus(
  * never fixes something that turns out to be blocked by an earlier step.
  */
 export function parentBlocker(status: ParentStatus): string | null {
+  if (!status.registered) {
+    return `nobody has registered ${status.parent.name} yet — it has to be bought before it can host agents`;
+  }
   if (status.registry === null) {
-    return `${status.parent.name} has no subregistry, so it cannot issue subnames to anyone yet — deploy one in the ENS manager first`;
+    return `${status.parent.name} has no subregistry yet, so it cannot issue subnames to anyone`;
+  }
+  if (!status.parentLinked) {
+    return `${status.parent.name}'s registry does not point back at the name, so records under it cannot be authorized`;
   }
   if (!status.connected) return `${status.parent.name} has not been connected to Capsule yet`;
   if (!status.registrarGranted) {

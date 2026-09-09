@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { CHAIN } from "@/lib/capsule/chain";
+import { refreshWallets } from "@/lib/wallet/discovery";
 import { shortAddress, useWallet } from "@/lib/wallet/WalletProvider";
 
 /* The wallet control in the nav. Four states, and the wrong-chain one is
@@ -37,9 +38,30 @@ export default function ConnectButton() {
     };
   }, [picking, menu]);
 
+  /* Only a genuine choice opens the picker.
+
+     This used to open it whenever there was not exactly one wallet, which meant
+     that finding *none* showed a panel telling the user to install the extension
+     they were very likely already looking at. `connect()` has always had a
+     `window.ethereum` fallback for exactly that case — a wallet that injects but
+     announces nothing, or announces after we asked — and this handler was the
+     reason it could never run.
+
+     So: re-ask first, since the user may have unlocked or enabled a wallet since
+     the page loaded, and hand anything under two to `connect()`, which knows how
+     to fall back and how to report failure. The picker is for a real ambiguity
+     between two installed wallets, which is the only thing it was ever for. */
   function onConnectClick() {
-    if (wallets.length === 1) void connect(wallets[0]!.info.rdns);
-    else setPicking((p) => !p);
+    if (picking) {
+      setPicking(false);
+      return;
+    }
+    refreshWallets();
+    if (wallets.length > 1) {
+      setPicking(true);
+      return;
+    }
+    void connect(wallets.length === 1 ? wallets[0]!.info.rdns : undefined);
   }
 
   /* ---------- connected ---------- */
@@ -101,35 +123,28 @@ export default function ConnectButton() {
       {picking && (
         <div className="panel" style={dropdown}>
           <div className="label" style={{ marginBottom: 10 }}>
-            {wallets.length === 0 ? "No wallet found" : "Choose a wallet"}
+            Choose a wallet
           </div>
 
-          {wallets.length === 0 ? (
-            <p className="hint" style={{ margin: 0, maxWidth: 220 }}>
-              No EIP-1193 wallet is installed in this browser. Install MetaMask, Rabby or another
-              wallet and reload.
-            </p>
-          ) : (
-            <div className="col" style={{ gap: 8 }}>
-              {wallets.map((w) => (
-                <button
-                  key={w.info.rdns}
-                  className="btn btn-sm btn-ghost"
-                  style={{ justifyContent: "flex-start", gap: 10, display: "flex", alignItems: "center" }}
-                  onClick={() => {
-                    setPicking(false);
-                    void connect(w.info.rdns);
-                  }}
-                >
-                  {w.info.icon !== "" && (
-                    /* eslint-disable-next-line @next/next/no-img-element */
-                    <img src={w.info.icon} alt="" width={18} height={18} style={{ borderRadius: 4 }} />
-                  )}
-                  {w.info.name}
-                </button>
-              ))}
-            </div>
-          )}
+          <div className="col" style={{ gap: 8 }}>
+            {wallets.map((w) => (
+              <button
+                key={w.info.rdns}
+                className="btn btn-sm btn-ghost"
+                style={{ justifyContent: "flex-start", gap: 10, display: "flex", alignItems: "center" }}
+                onClick={() => {
+                  setPicking(false);
+                  void connect(w.info.rdns);
+                }}
+              >
+                {w.info.icon !== "" && (
+                  /* eslint-disable-next-line @next/next/no-img-element */
+                  <img src={w.info.icon} alt="" width={18} height={18} style={{ borderRadius: 4 }} />
+                )}
+                {w.info.name}
+              </button>
+            ))}
+          </div>
         </div>
       )}
 

@@ -25,16 +25,31 @@
  * same shape as the recall, one level up: there is no `disableCapsule()` we
  * could decline to honour.
  *
- * ## What is NOT here
+ * ## The step before all four: a subregistry
  *
- * Deploying the name's *subregistry*. A `.eth` name registered through the ENSv2
- * beta has no subregistry — `getSubregistry` answers the zero address — and until
- * it has one, nobody can issue subnames under it by any means. That is an ENS
- * primitive rather than a Capsule one: it is a 31KB contract deployment plus a
- * two-way `setParent`/`setSubregistry` link, and getting that link half-right is
- * the failure that cost this project a day (contracts/NOTES.md, gotcha 1). So the
- * page detects it, names it, and sends the user to the ENS manager, rather than
- * shipping a second implementation of it that can be wrong in a new way.
+ * A `.eth` name registered through the ENSv2 beta has no subregistry —
+ * `getSubregistry` answers the zero address — and until it has one, nobody can
+ * issue subnames under it by any means. The four calls above all presuppose it:
+ * three of them are addressed *to* the registry, which does not exist yet.
+ *
+ * This was deliberately left to the ENS manager app for a while, on the theory
+ * that a 31KB deployment plus a two-way link was ENS's primitive to get right
+ * and not ours to reimplement. That turned out to be wrong on the facts. The
+ * manager does not set a subregistry either — of a thousand `NameRegistered`
+ * events on this deployment, zero carry one — so "go and do it there" was advice
+ * that could not be followed, and a name bought through `/register` had nowhere
+ * to go at all.
+ *
+ * So it is here, as `deploySubregistry` -> `attachSubregistry` ->
+ * `linkSubregistryParent`. Three transactions rather than one because they are
+ * addressed to three different contracts, and split rather than batched because
+ * each one is separately resumable: the expensive step is the first, and a user
+ * who lands on this page twice should pay for it once.
+ *
+ * Both halves of the link are required and neither implies the other. Setting
+ * only the parent->child half leaves a registry that resolves downward and not
+ * upward, which passes every obvious test and then fails resolver authorization
+ * — the failure that cost this project a day (contracts/NOTES.md, gotcha 1).
  */
 import {
   BaseError,
@@ -48,11 +63,14 @@ import {
 } from "viem";
 import {
   ALL_ROLES,
+  ETH_REGISTRY,
+  LABEL_STORE,
   PERMISSIONED_RESOLVER_IMPL,
   ROLE_REGISTRAR,
   VERIFIABLE_FACTORY,
   minterAbi,
   registryAbi,
+  registryDeployAbi,
   resolverAdminAbi,
   resolverInitAbi,
   verifiableFactoryAbi,
@@ -83,6 +101,10 @@ function revertMessage(name: string): string {
     case "EACUnauthorizedAccountRoles":
     case "EACCannotRevokeRoles":
       return "this wallet is not allowed to grant roles there";
+    case "NameExpired":
+      return "that name's registration has expired — renew it before connecting it";
+    case "InvalidSubregistry":
+      return "ENS rejected that registry — it is not a registry this name may point at";
     default:
       return `the transaction reverted with ${name}`;
   }
@@ -163,6 +185,136 @@ async function send(args: SendArgs, onPhase?: OnPhase): Promise<{ hash: Hex; log
     throw new ConnectError("reverted", "the transaction was mined but reverted");
   }
   return { hash, logs: receipt.logs };
+}
+
+/**
+ * Deploys a `PermissionedRegistry` the caller owns outright.
+ *
+ * The first of the three transactions that give a name a subregistry, and the
+ * only expensive one: 31KB of creation code, a little over five million gas.
+ *
+ * The bytecode is `await import`ed rather than imported at the top of the file
+ * so that it lands in its own chunk. Every page that touches /connect imports
+ * this module; only the handful of users whose name has no subregistry ever
+ * deploy one, and the rest should not download 62KB of hex to find that out.
+ *
+ * `rootAccount` is the caller and the role bitmap is `ALL_ROLES`, which means
+ * the registry answers to its owner and to nobody else — Capsule included. The
+ * minter gets `ROLE_REGISTRAR` on it afterwards, in `grantRegistrar`, as a
+ * separate signature. Deploying it through this app therefore grants Capsule
+ * nothing; it is the user's registry from the moment it exists, and it stays
+ * theirs if they never finish connecting.
+ */
+export async function deploySubregistry(
+  args: { walletClient: WalletClient; publicClient: PublicClient; owner: Address },
+  onPhase?: OnPhase,
+): Promise<{ hash: Hex; registry: Address }> {
+  const account = args.walletClient.account;
+  if (account === undefined) throw new ConnectError("failed", "the wallet client has no account");
+
+  onPhase?.("simulating");
+  const { PERMISSIONED_REGISTRY_BYTECODE } = await import("./registry-bytecode");
+
+  onPhase?.("signing");
+  let hash: Hex;
+  try {
+    hash = await args.walletClient.deployContract({
+      abi: registryDeployAbi,
+      bytecode: PERMISSIONED_REGISTRY_BYTECODE,
+      args: [LABEL_STORE, args.owner, ALL_ROLES],
+      account,
+      chain: args.walletClient.chain,
+    } as never);
+  } catch (error) {
+    throw explain(error);
+  }
+
+  onPhase?.("mining", hash);
+  let receipt;
+  try {
+    receipt = await args.publicClient.waitForTransactionReceipt({ hash });
+  } catch (error) {
+    throw explain(error);
+  }
+  if (receipt.status !== "success") {
+    throw new ConnectError("reverted", "the registry deployment was mined but reverted");
+  }
+  /* `contractAddress` comes off the receipt rather than from a CREATE address
+     computed here. A deployment is the one case where the address is a fact the
+     chain reports, and deriving it from (sender, nonce) instead would be a
+     second implementation that can disagree with the first. */
+  const registry = receipt.contractAddress;
+  if (registry === null || registry === undefined) {
+    throw new ConnectError("failed", "the deployment succeeded but produced no contract address");
+  }
+  return { hash, registry };
+}
+
+/**
+ * Points the name at the registry: the parent -> child half of the link.
+ *
+ * Sent to `ETH_REGISTRY` against the name's own token id, which is why it needs
+ * `tokenId` and not the label — `setSubregistry` is a role-gated write on the
+ * ERC-1155 token, and the role the registrar granted the owner at registration
+ * is scoped to exactly that id.
+ */
+export async function attachSubregistry(
+  args: {
+    walletClient: WalletClient;
+    publicClient: PublicClient;
+    tokenId: bigint;
+    registry: Address;
+  },
+  onPhase?: OnPhase,
+): Promise<Hex> {
+  const { hash } = await send(
+    {
+      walletClient: args.walletClient,
+      publicClient: args.publicClient,
+      address: ETH_REGISTRY,
+      abi: registryAbi,
+      functionName: "setSubregistry",
+      args: [args.tokenId, args.registry],
+    },
+    onPhase,
+  );
+  return hash;
+}
+
+/**
+ * Tells the registry which name it belongs to: the child -> parent half.
+ *
+ * Easy to skip, because everything visible works without it. Names resolve
+ * downward from a registry that has never been told its parent; what fails is
+ * resolving *upward*, and resolver authorization is upward — `findCanonicalName`
+ * returns an empty string the moment it meets a registry whose parent is zero,
+ * and every record write under the name reverts for a reason that names the
+ * wrong thing.
+ *
+ * So this is not a tidying step to be folded into the previous one. It is half
+ * of the link, and /connect reads both halves back before it calls a name wired.
+ */
+export async function linkSubregistryParent(
+  args: {
+    walletClient: WalletClient;
+    publicClient: PublicClient;
+    registry: Address;
+    label: string;
+  },
+  onPhase?: OnPhase,
+): Promise<Hex> {
+  const { hash } = await send(
+    {
+      walletClient: args.walletClient,
+      publicClient: args.publicClient,
+      address: args.registry,
+      abi: registryAbi,
+      functionName: "setParent",
+      args: [ETH_REGISTRY, args.label],
+    },
+    onPhase,
+  );
+  return hash;
 }
 
 /**
