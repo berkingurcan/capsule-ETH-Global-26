@@ -25,11 +25,42 @@ import { DEFAULT_PARENT_NAME } from "@/lib/capsule/public-env";
    until you say whose. Without that the analyst answers across every parent the
    deployment has ever served, which is almost never the question. */
 
+/**
+ * The questions the front door opens on.
+ *
+ * Chosen against one test: a question an `eth_call` could answer is a question
+ * that does not need this page. Every one of these needs *history* — events
+ * counted, ordered, joined across two contracts, or subtracted from each other
+ * — which is the thing a contract cannot tell you about itself and an index
+ * can. The first one is the sharpest: no contract emits a heartbeat and a role
+ * change together, so "did it die, or was it stopped?" exists only as a join.
+ *
+ * `why` is rendered under each. Not decoration — a visitor who clicks these in
+ * order should be able to say what the subgraph is *for* without being told,
+ * and the naming of real fields is what makes the answer checkable against the
+ * GraphQL that comes back.
+ */
 const SUGGESTIONS = [
-  "Which agents changed config today, and who authorised it?",
-  "Show me anything that stopped heartbeating before it was recalled.",
-  "What is every agent in the fleet running, and how often does each one beat?",
-  "Has any agent ever had its heartbeat role pulled and then given back?",
+  {
+    question: "Did any agent go silent before it was recalled, or was each one still healthy when it was stopped?",
+    why: "Joins a role change to the last heartbeat — two contracts, one field: secondsSinceLastBeat.",
+  },
+  {
+    question: "Which agent has been reconfigured the most, and what changed on it?",
+    why: "Counts every setText since the minter was deployed, then ranks by configWriteCount.",
+  },
+  {
+    question: "How often does each agent actually beat, and which one is drifting from the others?",
+    why: "No cadence is declared on chain. lastInterval is observed, beat to beat.",
+  },
+  {
+    question: "Who signed each write on this fleet — the owner, or the agent itself?",
+    why: "byAgent and writer, per record. The permission split, as it actually played out.",
+  },
+  {
+    question: "Has anything been minted here and never booted?",
+    why: "beatCount: 0. An empty answer is a real answer, and this is how you tell it from a failed lookup.",
+  },
 ];
 
 /**
@@ -473,19 +504,25 @@ export default function AnalystPage() {
           {/* suggestions */}
           <div className="col" style={{ gap: 18 }}>
             <div className="panel pad">
-              <div className="label" style={{ marginBottom: 12 }}>
+              <div className="label" style={{ marginBottom: 4 }}>
                 Try one
               </div>
+              <p className="hint" style={{ margin: "0 0 14px" }}>
+                Each of these needs history, not state — the part a contract cannot answer about itself.
+              </p>
               <div className="col" style={{ gap: 10 }}>
-                {SUGGESTIONS.map((question) => (
+                {SUGGESTIONS.map(({ question, why }) => (
                   <button
                     key={question}
                     className="pick"
-                    style={{ padding: "14px 16px", fontSize: 14, lineHeight: 1.45 }}
+                    style={{ padding: "14px 16px", fontSize: 14, lineHeight: 1.45, gap: 7 }}
                     onClick={() => void ask(question)}
                     disabled={busy}
                   >
-                    {question}
+                    <span>{question}</span>
+                    <span className="hint" style={{ fontSize: 12 }}>
+                      {why}
+                    </span>
                   </button>
                 ))}
               </div>

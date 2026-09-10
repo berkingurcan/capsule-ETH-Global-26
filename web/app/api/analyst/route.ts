@@ -112,11 +112,18 @@ const MAX_OUTPUT_TOKENS = 16000;
  * How many times the model may call a tool before it has to answer.
  *
  * Only reached in `direct` mode, where this route runs the loop; the MCP
- * server runs its own and returns once. Four is a schema read, two queries and
- * a retry — past that the model is guessing at a schema it has already been
- * shown, and a runaway loop on a metered API is a bill rather than an answer.
+ * server runs its own and returns once. Six is a schema read, a few queries
+ * and a retry — past that the model is guessing at a schema it has already
+ * been shown, and a runaway loop on a metered API is a bill rather than an
+ * answer.
+ *
+ * Reaching this ceiling is not a failure. The turn after it is issued with
+ * `tool_choice: "none"`, so the model answers from the rows it has instead of
+ * asking for more — see the loop in `POST`. Four turns with no such exit was
+ * the original shape, and it produced the worst possible outcome: every query
+ * paid for, every row fetched, and an error where the sentence should be.
  */
-const MAX_TOOL_TURNS = 4;
+const MAX_TOOL_TURNS = 6;
 
 /** Anything longer is not a question about a fleet of four agents. */
 const MAX_QUESTION = 500;
@@ -208,6 +215,14 @@ function scopeGuidance(parent: string | null): string {
 function instructions(env: AnalystEnv, parent: string | null): string {
   const tools = toolGuidance(env);
   const scope = scopeGuidance(parent);
+  // The model has no clock, and this route's most common question — "which
+  // agents changed config today" — is unanswerable without one. Left to work
+  // it out, it spends two or three tool turns triangulating the date off
+  // `_meta.block.timestamp` before it starts on the actual question, which is
+  // how a four-turn budget gets exhausted on a query that needed one turn.
+  // The server knows the time for free.
+  const now = Math.floor(Date.now() / 1000);
+  const midnight = Math.floor(now / 86400) * 86400;
   return `You are the fleet analyst for Capsule, reading a subgraph of AI agents that live as ENSv2 names on Ethereum Sepolia.
 
 ## What you are looking at
@@ -241,7 +256,16 @@ ${scope}
 
 \`secondsSinceLastBeat\` on a RoleChange is the field to reach for when someone asks whether an agent stopped before or after it was recalled. It is a join across two contracts' event streams that no single contract emits together, and it is the reason this subgraph exists.
 
-All timestamps are Unix seconds. Compare them to each other rather than to your own idea of the current time.
+## The time
+
+All timestamps in the subgraph are Unix seconds.
+
+- **Right now** is \`${now}\` — ${new Date(now * 1000).toISOString()}.
+- **Today** means a timestamp at or after \`${midnight}\`, which is midnight UTC this morning. Yesterday is the 86400 seconds before that.
+
+Use those two numbers directly. Do not spend a query working out the date from block timestamps, and do not fall back on your own idea of what year it is — the first wastes a turn you will want for the question, the second is wrong.
+
+\`_meta { block { number timestamp } }\` is still worth asking for, but for a different reason: it says how far behind the chain the index is. If its timestamp is far from \`${now}\`, the index is lagging and recent events may be missing — say so.
 
 ## How to answer
 
@@ -338,7 +362,20 @@ export async function POST(request: Request): Promise<Response> {
     controller: AbortController;
   };
 
-  const open = (input: OpenAI.Responses.ResponseInput, previousResponseId?: string): Promise<ResponseStream> =>
+  /**
+   * `answerOnly` is the exit ramp off the tool budget.
+   *
+   * The tools stay declared — the conversation carries `function_call` items
+   * that would not validate against a request with none — and `tool_choice`
+   * forbids reaching for them. So the last turn is spent on the sentence
+   * rather than on a seventh query, and running out of budget degrades into a
+   * narrower answer instead of no answer.
+   */
+  const open = (
+    input: OpenAI.Responses.ResponseInput,
+    previousResponseId?: string,
+    answerOnly = false,
+  ): Promise<ResponseStream> =>
     client.responses.create({
       model: MODEL,
       instructions: prompt,
@@ -347,6 +384,7 @@ export async function POST(request: Request): Promise<Response> {
       max_output_tokens: MAX_OUTPUT_TOKENS,
       ...(REASONING_SUMMARY ? { reasoning: { summary: "auto" as const } } : {}),
       tools,
+      ...(answerOnly ? { tool_choice: "none" as const } : {}),
       stream: true,
     }) as unknown as Promise<ResponseStream>;
 
@@ -374,95 +412,114 @@ export async function POST(request: Request): Promise<Response> {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       };
 
+      /**
+       * Relay one model turn to the page, and report what it asked for.
+       *
+       * A function rather than the body of the loop because the last turn is
+       * consumed outside it — once the tool budget is spent the model gets one
+       * more turn with `tool_choice: "none"`, and that turn's text has to
+       * reach the page the same way every other turn's does.
+       */
+      const consume = async (
+        current: ResponseStream,
+      ): Promise<{
+        pending: { callId: string; name: string; arguments: string }[];
+        responseId: string | undefined;
+      }> => {
+        const pending: { callId: string; name: string; arguments: string }[] = [];
+        let responseId: string | undefined;
+
+        for await (const event of current) {
+          switch (event.type) {
+            case "response.output_text.delta":
+              send({ type: "text", text: event.delta });
+              break;
+
+            case "response.reasoning_summary_text.delta":
+              send({ type: "thinking", text: event.delta });
+              break;
+
+            // A tool call is reported twice on purpose. `added` carries the
+            // name and nothing else, which is what lets the page say
+            // "running a query" while the arguments are still streaming;
+            // `done` carries the finished arguments, which is the GraphQL
+            // the answer has to be checkable against. The page upserts on
+            // the id, so the second overwrites the first.
+            case "response.output_item.added": {
+              const item = event.item;
+              if (item.type === "mcp_call") send({ type: "tool", id: item.id, name: item.name });
+              else if (item.type === "function_call") send({ type: "tool", id: item.call_id, name: item.name });
+              break;
+            }
+
+            case "response.output_item.done": {
+              const item = event.item;
+              if (item.type === "mcp_call") {
+                send({
+                  type: "tool",
+                  id: item.id,
+                  name: item.name,
+                  input: safeParse(item.arguments),
+                  failed: item.error !== null && item.error !== undefined,
+                });
+              } else if (item.type === "function_call") {
+                send({
+                  type: "tool",
+                  id: item.call_id,
+                  name: item.name,
+                  input: safeParse(item.arguments),
+                });
+                pending.push({ callId: item.call_id, name: item.name, arguments: item.arguments });
+              }
+              break;
+            }
+
+            case "response.mcp_call.failed":
+              // The tool itself failed — a bad gateway key, a subgraph id
+              // that does not resolve, a query the index rejected. The model
+              // may still recover by trying something else, so this is
+              // reported and not treated as the end of the answer.
+              send({ type: "tool_failed" });
+              break;
+
+            case "response.completed":
+              responseId = event.response.id;
+              break;
+
+            case "response.failed": {
+              const detail = event.response.error;
+              send({ type: "error", message: detail?.message ?? "the model run failed" });
+              break;
+            }
+
+            case "response.incomplete": {
+              const reason = event.response.incomplete_details?.reason;
+              send({
+                type: "error",
+                message:
+                  reason === "max_output_tokens"
+                    ? "The answer ran past its length limit — try a narrower question."
+                    : `The run stopped early (${reason ?? "unknown reason"}).`,
+              });
+              break;
+            }
+
+            case "error":
+              send({ type: "error", message: event.message ?? "the stream errored" });
+              break;
+          }
+        }
+
+        return { pending, responseId };
+      };
+
       try {
         // One iteration in `mcp` mode — the MCP server runs its own tool loop
         // and the response comes back finished. In `direct` mode this is the
         // loop: stream a turn, execute whatever functions it asked for, hand
         // the results back, stream the next one.
-        for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
-          const pending: { callId: string; name: string; arguments: string }[] = [];
-          let responseId: string | undefined;
-
-          for await (const event of stream) {
-            switch (event.type) {
-              case "response.output_text.delta":
-                send({ type: "text", text: event.delta });
-                break;
-
-              case "response.reasoning_summary_text.delta":
-                send({ type: "thinking", text: event.delta });
-                break;
-
-              // A tool call is reported twice on purpose. `added` carries the
-              // name and nothing else, which is what lets the page say
-              // "running a query" while the arguments are still streaming;
-              // `done` carries the finished arguments, which is the GraphQL
-              // the answer has to be checkable against. The page upserts on
-              // the id, so the second overwrites the first.
-              case "response.output_item.added": {
-                const item = event.item;
-                if (item.type === "mcp_call") send({ type: "tool", id: item.id, name: item.name });
-                else if (item.type === "function_call") send({ type: "tool", id: item.call_id, name: item.name });
-                break;
-              }
-
-              case "response.output_item.done": {
-                const item = event.item;
-                if (item.type === "mcp_call") {
-                  send({
-                    type: "tool",
-                    id: item.id,
-                    name: item.name,
-                    input: safeParse(item.arguments),
-                    failed: item.error !== null && item.error !== undefined,
-                  });
-                } else if (item.type === "function_call") {
-                  send({
-                    type: "tool",
-                    id: item.call_id,
-                    name: item.name,
-                    input: safeParse(item.arguments),
-                  });
-                  pending.push({ callId: item.call_id, name: item.name, arguments: item.arguments });
-                }
-                break;
-              }
-
-              case "response.mcp_call.failed":
-                // The tool itself failed — a bad gateway key, a subgraph id
-                // that does not resolve, a query the index rejected. The model
-                // may still recover by trying something else, so this is
-                // reported and not treated as the end of the answer.
-                send({ type: "tool_failed" });
-                break;
-
-              case "response.completed":
-                responseId = event.response.id;
-                break;
-
-              case "response.failed": {
-                const detail = event.response.error;
-                send({ type: "error", message: detail?.message ?? "the model run failed" });
-                break;
-              }
-
-              case "response.incomplete": {
-                const reason = event.response.incomplete_details?.reason;
-                send({
-                  type: "error",
-                  message:
-                    reason === "max_output_tokens"
-                      ? "The answer ran past its length limit — try a narrower question."
-                      : `The run stopped early (${reason ?? "unknown reason"}).`,
-                });
-                break;
-              }
-
-              case "error":
-                send({ type: "error", message: event.message ?? "the stream errored" });
-                break;
-            }
-          }
+        for (let turn = 0; ; turn += 1) {
+          const { pending, responseId } = await consume(stream);
 
           if (pending.length === 0) break;
 
@@ -480,18 +537,19 @@ export async function POST(request: Request): Promise<Response> {
             })),
           );
 
-          if (turn === MAX_TOOL_TURNS - 1) {
-            // Out of budget with results in hand and nowhere to spend them.
-            // Better to say so than to let the page show a transcript of
-            // queries and no sentence at the end of it.
-            send({
-              type: "error",
-              message: `The analyst used its ${MAX_TOOL_TURNS} tool calls without reaching an answer — try a narrower question.`,
-            });
+          // Out of budget, with results in hand. The turn that spends them is
+          // issued with tools switched off rather than skipped: the rows have
+          // already been fetched and paid for, and the model has one more
+          // chance to turn them into a sentence. Erroring here instead — which
+          // is what this did — threw away a complete answer at the last step
+          // and showed a transcript of queries with nothing at the end of it.
+          const lastTurn = turn >= MAX_TOOL_TURNS - 1;
+          stream = await open(results, responseId, lastTurn);
+
+          if (lastTurn) {
+            await consume(stream);
             break;
           }
-
-          stream = await open(results, responseId);
         }
         send({ type: "done" });
       } catch (error) {
