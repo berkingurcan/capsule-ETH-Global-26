@@ -124,14 +124,28 @@ export async function GET(request: Request): Promise<NextResponse> {
   }
 
   // --- 5. the rows ---------------------------------------------------------
+  //
+  // Scoped to `identity.address` — the agent this name publicly claims — and not
+  // to the name alone. Rows are written before the mint, when nobody owns the
+  // label yet, so several proposals can exist for one name; the chain picks the
+  // winner and this read follows it. A losing proposal's credentials are still
+  // in the table and are addressed by nothing.
+  //
+  // `signer` was just proved equal to `identity.address`, so either would do.
+  // The chain's value is used deliberately: the store should be keyed by what
+  // the name says, not by what the caller presented.
   const store = createStore(env);
 
   let providerRow;
   let telegramRow;
   try {
     [providerRow, telegramRow] = await Promise.all([
-      secrets.readProviderKey(store, { capsuleName: name, provider: parsed.provider }),
-      secrets.readTelegramToken(store, { capsuleName: name }),
+      secrets.readProviderKey(store, {
+        capsuleName: name,
+        agentAddress: identity.address,
+        provider: parsed.provider,
+      }),
+      secrets.readTelegramToken(store, { capsuleName: name, agentAddress: identity.address }),
     ]);
   } catch (error) {
     // A row that will not decrypt is an integrity failure, not a miss. Loud in

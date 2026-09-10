@@ -3,10 +3,12 @@
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import Capsule from "./Capsule";
-import { PARENT } from "@/lib/mock";
+import ConnectButton from "./ConnectButton";
 
 const LINKS = [
   { href: "/launch", label: "Launch" },
+  { href: "/register", label: "Register a name" },
+  { href: "/connect", label: "Connect a name" },
   { href: "/fleet", label: "Fleet" },
   { href: "/analyst", label: "Analyst" },
 ];
@@ -34,15 +36,15 @@ export default function Nav() {
             ))}
           </div>
 
-          <span className="tag sun" style={{ marginLeft: "auto" }} title="Nothing here touches a chain or a wallet">
-            Demo · mock data
+          <span
+            className="tag"
+            style={{ marginLeft: "auto" }}
+            title="Names, records, roles and heartbeats are read from ETH Sepolia at request time."
+          >
+            Live · Sepolia
           </span>
 
-          <div className="wallet" title="Connected parent name">
-            <span className="dot" />
-            <span>{PARENT.name}</span>
-            <span style={{ opacity: 0.6 }}>0x7a1c…9e40</span>
-          </div>
+          <ConnectButton />
         </div>
       </nav>
 

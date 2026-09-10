@@ -2,19 +2,18 @@
 
 import { useEffect, useRef, useState } from "react";
 import Capsule from "@/components/Capsule";
-import { ANSWERS, type Answer } from "@/lib/mock";
+import { ANSWERS, type Answer } from "@/lib/analyst-demo";
 
-/* The fleet analyst: a Subgraph MCP server over both subgraphs, asked in
-   plain language. The point of the track is the reasoning, not the rows —
-   so every answer leads with a sentence and shows its query underneath. */
+/* The fleet analyst: a Subgraph MCP server over the Sepolia subgraph,
+   asked in plain language. The point of the track is the reasoning, not
+   the rows — so every answer leads with a sentence and shows its query
+   underneath.
+
+   One subgraph, not two: the Base half went with x402 on 2026-09-08. */
 
 const QUERIES = [
   `{ records(where: { day: "today" }) {
     name  key  writer  txHash
-} }`,
-  `{ agents { name
-    earned: transfersTo(currency: "USDC")
-    spent:  transfersFrom(currency: "USDC")
 } }`,
   `{ heartbeats(orderBy: time) { name  time }
    roleRevokes { name  time  by } }`,
@@ -27,10 +26,10 @@ export default function AnalystPage() {
     {
       who: "analyst",
       text:
-        "I read both subgraphs — names, roles and heartbeats on Sepolia, USDC on Base. Ask me about the fleet in plain language.",
+        "I read the fleet subgraph — names, records, roles and heartbeats on ETH Sepolia. Ask me about the fleet in plain language.",
     },
-    { who: "you", text: ANSWERS[2].q },
-    { who: "analyst", text: ANSWERS[2].a, answer: ANSWERS[2], query: QUERIES[2] },
+    { who: "you", text: ANSWERS[1].q },
+    { who: "analyst", text: ANSWERS[1].a, answer: ANSWERS[1], query: QUERIES[1] },
   ]);
   const [thinking, setThinking] = useState(false);
   const [draft, setDraft] = useState("");
@@ -60,7 +59,7 @@ export default function AnalystPage() {
           {
             who: "analyst",
             text:
-              "This demo only carries three worked answers. Try one of the questions on the left — those run against the real subgraph shape.",
+              "This demo only carries two worked answers, and they are scripted — the subgraph is not deployed yet. Try one of the questions on the left.",
           },
         ]);
       }
@@ -76,9 +75,17 @@ export default function AnalystPage() {
           </p>
           <h2 style={{ fontSize: 32, marginTop: 6 }}>Ask what the fleet did.</h2>
           <p className="hint" style={{ marginTop: 6, maxWidth: "68ch" }}>
-            A Subgraph MCP server sits over both subgraphs. It answers in sentences and shows the query it ran, so you
-            can check it.
+            A Subgraph MCP server sits over the fleet subgraph. It answers in sentences and shows the query it ran,
+            so you can check it.
           </p>
+          <div className="notice" style={{ marginTop: 16, borderColor: "var(--sun)", background: "#fff" }}>
+            <span className="tag ink">Scripted</span>
+            <p style={{ margin: 0 }}>
+              This page is the only one left that is not reading live data — the subgraph it describes is not deployed
+              yet, so the two answers below are worked examples drawn from a real Phase 5 run. Everything on{" "}
+              <a href="/fleet">the fleet dashboard</a> is read from ETH Sepolia at request time.
+            </p>
+          </div>
         </div>
 
         <div className="grid g-side" style={{ gap: 26 }}>
@@ -90,7 +97,7 @@ export default function AnalystPage() {
                 capsule-analyst
               </span>
               <span className="push mono" style={{ fontSize: 11, color: "var(--vend-300)" }}>
-                2 subgraphs · MCP
+                subgraph · MCP
               </span>
             </div>
 
@@ -163,7 +170,7 @@ export default function AnalystPage() {
                     querying
                   </span>
                   <span className="hint mono" style={{ fontSize: 12 }}>
-                    reading subgraph-sepolia, subgraph-base…
+                    reading subgraph-sepolia…
                   </span>
                 </div>
               )}
@@ -215,8 +222,9 @@ export default function AnalystPage() {
             <div className="notice paper">
               <span className="tag ink">Why</span>
               <p style={{ margin: 0 }}>
-                Permission events and money events sit in the same story. That is what makes a question like “is any
-                agent earning less than it spends?” answerable at all.
+                Mints, record edits, role grants and heartbeats sit in one index. That is what makes a question like
+                “did anything stop beating before it was recalled?” answerable at all — the answer is a join across
+                three event types no single contract emits together.
               </p>
             </div>
           </div>

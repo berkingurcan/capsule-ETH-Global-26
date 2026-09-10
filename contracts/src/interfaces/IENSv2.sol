@@ -37,6 +37,26 @@ interface IPermissionedRegistry {
     /// @notice Current owner of a label, or `address(0)` if unregistered or expired.
     function findOwner(string calldata label) external view returns (address owner);
 
+    /// @notice The registry holding this registry's own name, and that name's label.
+    /// @dev `(address(0), "")` until someone calls `setParent`. This is the upward half
+    ///      of the two-way link an ENSv2 subregistry needs; `getSubregistry` on the
+    ///      returned registry is the downward half, and `CapsuleMinter.connectParent`
+    ///      checks both, because either one alone can be asserted by a contract that is
+    ///      not actually anybody's subregistry.
+    function getParent() external view returns (address parent, string memory label);
+
+    /// @notice The subregistry issuing `label`'s children, or `address(0)` for none.
+    function getSubregistry(string calldata label) external view returns (address);
+
+    /// @notice The resolver recorded for `label`.
+    /// @dev NOT used to discover a parent's resolver. On the hackathon deployment
+    ///      `ETHRegistry.getResolver("capsulefleet")` answers `PublicResolverV2`, which
+    ///      cannot authorize ENSv2-native names at all (NOTES.md, gotcha 2) — the
+    ///      resolver capsules actually use is the `PermissionedResolver` proxy passed to
+    ///      `register()` per subname. So the parent's resolver is supplied to
+    ///      `connectParent` by the parent's own admin and stored, never inferred.
+    function getResolver(string calldata label) external view returns (address);
+
     function grantRootRoles(uint256 roleBitmap, address account) external returns (bool);
 
     function hasRoles(uint256 resource, uint256 roleBitmap, address account)

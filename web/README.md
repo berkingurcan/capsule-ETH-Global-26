@@ -1,12 +1,13 @@
 # capsule-client
 
-Front end for **Capsule** — the ENSv2 agent launchpad. This is the design demo:
-every screen is real and clickable, and every number behind it is mock data.
-Nothing here connects a wallet, calls a contract or talks to a server.
+Front end for **Capsule** — the ENSv2 agent launchpad. `/launch` mints capsules and
+`/fleet` reads them back off ETH Sepolia; both sign with the visitor's own wallet.
+The one page still on canned data is `/analyst`, which says so on screen.
 
 ```
 npm install
-npm run dev      # http://localhost:3000
+cp .env.example .env.local   # the RPC, the minter, the store, Fly
+npm run dev                  # http://localhost:3000
 ```
 
 ## The screens
@@ -52,13 +53,27 @@ machine-issued.
 
 ## Where the fake data lives
 
-All of it is in [`lib/mock.ts`](lib/mock.ts): agents, roles, the activity feed,
-payments and the analyst's three worked answers. Swapping it for ENSjs reads and
-two subgraph queries is the next job — the component props are already shaped like
-what those return.
+One file, named for what it is: [`lib/analyst-demo.ts`](lib/analyst-demo.ts), the
+analyst's worked answers, pending the subgraph. Nothing on `/fleet` imports it —
+every value there is read from the chain — and an import of it from anywhere else is
+a bug you can grep for.
+
+## The checks
+
+None of them send a transaction, and each one asserts something a passing build does
+not. Run them against a live `.env.local`.
+
+| | |
+|---|---|
+| `npm run check:records` | the record keys agree across Solidity, runner and web |
+| `npm run check:fleet` | the read path: resource ids, event signatures, `authorized` |
+| `npm run check:mint` | the mint, simulated — struct order, reverts, `CapsuleMinted` |
+| `npm run check:recall` | the kill switch, simulated from the real owner and from a stranger |
+| `npm run check:prepare` / `check:provision` | the two server routes |
 
 ## Not wired up
 
-Wallet connection, contract calls, the x402 handshake, Fly log streams and the MCP
-server are all simulated on timers. The launchpad's payment and mint steps play out
-the real sequence so the flow can be demoed end to end without a chain.
+The x402 handshake, Fly log streams and the MCP analyst are still simulated. The
+recall is not: `/fleet` sends `authorizeTextRoles(dnsName, "agent-heartbeat", agent,
+false)` from the owner's wallet to the name's own resolver, and reports the capsule
+recalled only after reading the permission back.

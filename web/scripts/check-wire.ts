@@ -14,6 +14,10 @@ import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
 
 import {
+  PREPARE_PREFIX,
+  prepareMessage,
+  PROVISION_PREFIX,
+  provisionMessage,
   PROMPT_FETCH_PREFIX,
   RUNTIME_FETCH_PREFIX,
   runtimeFetchMessage,
@@ -139,6 +143,83 @@ expect(
 );
 
 let failed = 0;
+////////////////////////////////////////////////////////////////////////////
+// The launchpad's separator
+////////////////////////////////////////////////////////////////////////////
+
+// `capsule-prepare` has no runner counterpart — it is signed in a browser by a
+// person, not by an agent — so there is nothing to compare it against. What
+// still has to hold is that it is distinct from both agent separators, because
+// it authorises a *write* and the other two authorise reads. A signature
+// captured from any one of the three must be useless on the other two.
+//
+// Compared against the prefixes as the RUNNER spells them, not against the web
+// constants: those are distinct string literal types, so TypeScript already
+// proves they differ and asserting it at runtime would tell us nothing. What is
+// worth asserting is that the browser's separator does not collide with what
+// the agent side actually sends — the same reasoning the runtime check above
+// uses.
+const agentPrefixes = [prefix, runtimePrefix].filter((p): p is string => p !== undefined);
+expect(
+  "prepare prefix is distinct from both agent prefixes",
+  agentPrefixes.length === 2 && !agentPrefixes.includes(PREPARE_PREFIX),
+  `prepare "${PREPARE_PREFIX}" vs runner [${agentPrefixes.join(", ")}]`,
+);
+
+// The prepare message carries a body digest; the other two carry no content at
+// all. This asserts the digest is actually in the signed string — dropping it
+// would leave a signature that says "this address wanted to prepare something"
+// rather than "this address wanted to prepare this".
+const prepareSample = prepareMessage(
+  "analyst.capsulefleet.eth",
+  "0x9E0283E37Bd2F2c6bEFC29b89CF2d86fe5b5fB71",
+  "0xdeadbeef",
+  1757260800,
+);
+expect(
+  "prepare sample",
+  prepareSample ===
+    "capsule-prepare\nanalyst.capsulefleet.eth\n0x9e0283e37bd2f2c6befc29b89cf2d86fe5b5fb71\n0xdeadbeef\n1757260800",
+  JSON.stringify(prepareSample),
+);
+
+expect(
+  "prepare message binds the body digest",
+  prepareSample.includes("0xdeadbeef"),
+  "the signature would not cover the request body",
+);
+
+////////////////////////////////////////////////////////////////////////////
+// The provisioner's separator
+////////////////////////////////////////////////////////////////////////////
+
+// `capsule-provision` has no runner counterpart either — it is also signed in a
+// browser, by the name's owner. It must be distinct from all three of the
+// others, and the reason is sharper than for `capsule-prepare`: this is the only
+// signature in the system that makes us SPEND. A signature captured from the
+// launch form, or from an agent's own prompt fetch, must not be replayable into
+// a request that funds a wallet and starts a machine.
+expect(
+  "provision prefix is distinct from every other separator",
+  ![...agentPrefixes, PREPARE_PREFIX].includes(PROVISION_PREFIX),
+  `provision "${PROVISION_PREFIX}" vs [${[...agentPrefixes, PREPARE_PREFIX].join(", ")}]`,
+);
+
+const provisionSample = provisionMessage("Analyst.CapsuleFleet.eth", 1757260800);
+expect(
+  "provision sample",
+  provisionSample === "capsule-provision\nanalyst.capsulefleet.eth\n1757260800",
+  JSON.stringify(provisionSample),
+);
+
+// The name is the whole payload. If it ever stopped being in the signed string,
+// one owner's signature would provision any of their names — or any name at all.
+expect(
+  "provision message binds the capsule name",
+  provisionSample.includes("analyst.capsulefleet.eth"),
+  "the signature would not name which capsule to start",
+);
+
 for (const c of checks) {
   if (c.ok) {
     console.log(`  ok    ${c.name}`);

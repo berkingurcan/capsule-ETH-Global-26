@@ -10,8 +10,10 @@
  *   npm run preflight
  */
 import { neon } from "@neondatabase/serverless";
-import { createServerClient, minterAbi } from "../lib/capsule/chain";
-import { loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
+import { formatEther, zeroAddress } from "viem";
+import { ETH_REGISTRY, createServerClient, minterAbi, registryAbi } from "../lib/capsule/chain";
+import { encodeParent } from "../lib/capsule/parent";
+import { loadProvisionerEnv, loadServerEnv, InvalidEnvError, MissingEnvError } from "../lib/capsule/env";
 import { getApp } from "../lib/capsule/fly";
 
 type Check = { name: string; ok: boolean; detail: string };
@@ -50,18 +52,37 @@ async function main() {
     record("rpc", false, `SEPOLIA_RPC_URL unreachable — ${reason(error)}`);
   }
 
-  // --- The minter still holds its resolver roles --------------------------
-  // Reverts with MissingResolverRoles if someone revoked them. A paid user
-  // hitting this is the worst failure in the system, so it is checked here.
+  // --- The minter can still mint under the default parent ------------------
+  // The worst failure in the system is a user paying gas for a mint that reverts
+  // because a role was revoked, so it is checked here, before a deploy.
+  //
+  // Scoped to `CAPSULE_PARENT_NAME`. One minter now serves every name whose owner
+  // connected it, and this deployment cannot be responsible for those: their
+  // owners can revoke the minter's roles whenever they like, and their doing so
+  // is not a problem with this deployment. It IS a problem if the demo's own
+  // front door is broken, which is what this asks about.
   try {
-    // A view function, so this is an eth_call: free, and it reverts with
-    // MissingResolverRoles exactly as a real mint would.
-    await client.readContract({
-      address: env.minterAddress,
-      abi: minterAbi,
-      functionName: "checkResolverRoles",
+    const parent = encodeParent(env.defaultParentName);
+    const registry = await client.readContract({
+      address: ETH_REGISTRY,
+      abi: registryAbi,
+      functionName: "getSubregistry",
+      args: [parent.label],
     });
-    record("minter", true, `${env.minterAddress} holds its resolver root roles`);
+    if (registry === zeroAddress) {
+      record("minter", false, `${parent.name} has no subregistry, so nothing can mint under it`);
+    } else {
+      const [connected, registrar, resolverRoles] = await client.readContract({
+        address: env.minterAddress,
+        abi: minterAbi,
+        functionName: "readiness",
+        args: [registry, env.minterAddress],
+      });
+      if (!connected) record("minter", false, `${parent.name} is not connected — run ConnectParent.s.sol`);
+      else if (!registrar) record("minter", false, `the minter lacks ROLE_REGISTRAR on ${parent.name}`);
+      else if (!resolverRoles) record("minter", false, `the minter lacks resolver roles on ${parent.name}`);
+      else record("minter", true, `${env.minterAddress} can mint under ${parent.name}`);
+    }
   } catch (error) {
     record("minter", false, `${env.minterAddress} — ${reason(error)}`);
   }
@@ -84,9 +105,35 @@ async function main() {
     record("fly", false, reason(error));
   }
 
+  // --- The funder ---------------------------------------------------------
+  //
+  // Reported, not required. `CAPSULE_FUNDER_KEY` is loaded by the provision
+  // route alone, so a deployment that only mints is correctly configured
+  // without it — and one that means to provision wants to know before a user
+  // does that its wallet is empty.
+  try {
+    const provisioner = loadProvisionerEnv();
+    const balance = await client.getBalance({ address: provisioner.funderAddress });
+    const capsules = balance / provisioner.agentFundingWei;
+    record(
+      "funder",
+      capsules > 0n,
+      capsules > 0n
+        ? `${provisioner.funderAddress} · ${formatEther(balance)} ETH · ${capsules} capsule(s) at ${formatEther(provisioner.agentFundingWei)} each`
+        : `${provisioner.funderAddress} holds ${formatEther(balance)} ETH — not enough to fund one agent`,
+    );
+  } catch (error) {
+    if (error instanceof MissingEnvError && error.varName === "CAPSULE_FUNDER_KEY") {
+      console.log("");
+      console.log("  note      CAPSULE_FUNDER_KEY is unset — minting works, provisioning answers 503");
+    } else {
+      record("funder", false, reason(error));
+    }
+  }
+
   // --- Informational ------------------------------------------------------
   console.log("");
-  console.log(`  parent    ${env.parentName}`);
+  console.log(`  parent    ${env.defaultParentName} (default; others connect at /connect)`);
   console.log(`  image     ${env.runnerImage}`);
   console.log(`  region    ${env.flyRegion}`);
   console.log(`  endpoint  ${env.publicUrl}`);

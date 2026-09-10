@@ -50,6 +50,66 @@ export function runtimeFetchMessage(name: string, timestamp: number): string {
   return [RUNTIME_FETCH_PREFIX, name, String(timestamp)].join("\n");
 }
 
+/**
+ * The launchpad → control plane request, signed by the owner's wallet.
+ *
+ * A third separator, for a caller that is not an agent. The other two are signed
+ * by a key this system generated and handed to a container; this one is signed
+ * in a browser by a person, and it authorises a *write* rather than a read. A
+ * signature captured from any of the three must be useless on the other two.
+ *
+ * ## Why the body is in the message
+ *
+ * The other two messages name a resource and nothing else, because the answer is
+ * whatever the chain currently says. This one carries content — a prompt body, a
+ * bot token, a provider key — and the signature has to cover it, or it
+ * authorises "this address wanted to prepare something" rather than "this
+ * address wanted to prepare *this*". Anything that can reach between the browser
+ * and the route within the TTL could otherwise keep the header and swap the
+ * payload.
+ *
+ * `digest` is the keccak256 of the exact request body, computed over the bytes
+ * that are actually sent. Not over a re-serialisation of a parsed object: two
+ * JSON encoders disagree about key order and unicode escapes, and a digest that
+ * is right on one platform and wrong on another is worse than no digest.
+ *
+ * ## What this does NOT establish
+ *
+ * That the signer owns, or will own, the name. Nobody does yet — `mint()` is
+ * permissionless and the name is unregistered at this point. It binds the write
+ * to an address so a rate limit has something to count, and binds the content to
+ * that address so it cannot be tampered with. Ownership is settled later, on
+ * chain, by whoever actually sends the mint.
+ */
+export const PREPARE_PREFIX = "capsule-prepare";
+
+export function prepareMessage(
+  capsuleName: string,
+  owner: string,
+  digest: string,
+  timestamp: number,
+): string {
+  return [PREPARE_PREFIX, capsuleName, owner.toLowerCase(), digest, String(timestamp)].join("\n");
+}
+
+/**
+ * Longer than the agents' 60 seconds, because a person is in the loop.
+ *
+ * The runner signs and sends in the same tick; a human sees a wallet popup,
+ * reads it, and may pick up their phone to approve it. Sixty seconds fails that
+ * often enough to train people to click without reading, which costs more than
+ * the extra window.
+ */
+export const PREPARE_TTL_SECONDS = 300;
+
+export function isPrepareTimestampFresh(
+  timestamp: number,
+  now = Math.floor(Date.now() / 1000),
+): boolean {
+  const age = now - timestamp;
+  return age <= PREPARE_TTL_SECONDS && age >= -CLOCK_SKEW_SECONDS;
+}
+
 export function isTimestampFresh(timestamp: number, now = Math.floor(Date.now() / 1000)): boolean {
   const age = now - timestamp;
   return age <= SIGNATURE_TTL_SECONDS && age >= -CLOCK_SKEW_SECONDS;
@@ -57,4 +117,34 @@ export function isTimestampFresh(timestamp: number, now = Math.floor(Date.now() 
 
 export function isSameAddress(a: Address, b: Address): boolean {
   return isAddressEqual(a, b);
+}
+
+/**
+ * The launchpad → provisioner request, signed by the name's owner.
+ *
+ * A fourth separator. The prepare signature is from an address that hopes to
+ * own a name; this one is from an address the chain says *does* own it, and the
+ * route checks that against `registry.findOwner` before it spends anything.
+ *
+ * ## Why there is no digest here
+ *
+ * `prepareMessage` carries one because its body is content — a prompt, a token,
+ * a key — and a signature that did not cover it would authorise "this address
+ * wanted to prepare something". A provision request has exactly one field, the
+ * label, and the capsule name built from it is *in this message*. There is
+ * nothing left for a digest to cover.
+ *
+ * The name is the full capsule name, built by the caller from the parent it
+ * believes it is launching under and rebuilt by the route from its own
+ * `CAPSULE_PARENT_NAME`. A browser holding a stale parent therefore gets a
+ * signature failure rather than a machine booted for the wrong name.
+ *
+ * Freshness uses `isPrepareTimestampFresh`: both of the human-signed routes get
+ * the longer window, because a person reads a wallet prompt and may pick up
+ * their phone to approve it.
+ */
+export const PROVISION_PREFIX = "capsule-provision";
+
+export function provisionMessage(capsuleName: string, timestamp: number): string {
+  return [PROVISION_PREFIX, capsuleName.toLowerCase(), String(timestamp)].join("\n");
 }

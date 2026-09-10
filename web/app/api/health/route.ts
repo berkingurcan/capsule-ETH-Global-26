@@ -13,7 +13,9 @@
  */
 import { NextResponse } from "next/server";
 import { neon } from "@neondatabase/serverless";
-import { createServerClient, minterAbi } from "@/lib/capsule/chain";
+import { zeroAddress } from "viem";
+import { ETH_REGISTRY, createServerClient, minterAbi, registryAbi } from "@/lib/capsule/chain";
+import { encodeParent } from "@/lib/capsule/parent";
 import { loadServerEnv } from "@/lib/capsule/env";
 
 export const runtime = "nodejs";
@@ -62,12 +64,33 @@ export async function GET(): Promise<NextResponse> {
     probe("minter", async () => {
       // The check that matters most operationally: if the minter has lost its
       // resolver roles, every mint reverts after the user has already paid.
-      await createServerClient(env.rpcUrl).readContract({
+      //
+      // Scoped to the DEFAULT parent, which is the honest scope for a health
+      // check now that one minter serves many names. A green light here says the
+      // demo's front door works; it says nothing about a name someone connected
+      // an hour ago, and it should not, because that name's owner can revoke the
+      // minter's roles at will and their doing so is not this deployment being
+      // unhealthy. Per-parent readiness is what /connect and the launch form read.
+      const client = createServerClient(env.rpcUrl);
+      const parent = encodeParent(env.defaultParentName);
+      const registry = await client.readContract({
+        address: ETH_REGISTRY,
+        abi: registryAbi,
+        functionName: "getSubregistry",
+        args: [parent.label],
+      });
+      if (registry === zeroAddress) return `${parent.name} has no subregistry`;
+
+      const [connected, registrarGranted, resolverRolesGranted] = await client.readContract({
         address: env.minterAddress,
         abi: minterAbi,
-        functionName: "checkResolverRoles",
+        functionName: "readiness",
+        args: [registry, env.minterAddress],
       });
-      return "resolver roles held";
+      if (!connected) throw new Error(`${parent.name} is not connected to the minter`);
+      if (!registrarGranted) throw new Error(`the minter lacks ROLE_REGISTRAR on ${parent.name}`);
+      if (!resolverRolesGranted) throw new Error(`the minter lacks resolver roles on ${parent.name}`);
+      return `connected, roles held on ${parent.name}`;
     }),
     probe("database", async () => {
       const rows = (await neon(env.databaseUrl)`select 1 as ok`) as { ok: number }[];
@@ -78,7 +101,7 @@ export async function GET(): Promise<NextResponse> {
   const ok = checks.every((c) => c.ok);
 
   return NextResponse.json(
-    { ok, endpoint: `${env.publicUrl}/api`, parent: env.parentName, checks },
+    { ok, endpoint: `${env.publicUrl}/api`, parent: env.defaultParentName, checks },
     { status: ok ? 200 : 503, headers: { "cache-control": "no-store" } },
   );
 }

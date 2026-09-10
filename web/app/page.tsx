@@ -1,6 +1,13 @@
 import Link from "next/link";
 import Capsule from "@/components/Capsule";
 import ActivityFeed from "@/components/ActivityFeed";
+import { loadFleet } from "@/lib/capsule/fleet-server";
+
+/* The feed at the bottom is real, so this page reads the chain. If that read
+   fails the section is dropped rather than faked — a landing page is the worst
+   place to show invented activity, because it is the one page a judge lands on
+   without knowing what is real. */
+export const dynamic = "force-dynamic";
 
 const TOUR = [
   {
@@ -8,7 +15,7 @@ const TOUR = [
     n: "01",
     cap: "#FFC42E",
     title: "The launchpad",
-    body: "Pick a subname, give it a brain, pay a dollar over x402, mint. Five screens, one form.",
+    body: "Pick a subname, give it a brain, hand it its secrets, mint. Five screens, one form.",
     cta: "Hire an agent",
   },
   {
@@ -16,7 +23,7 @@ const TOUR = [
     n: "02",
     cap: "#8CF0B4",
     title: "The fleet",
-    body: "Every capsule you own, its heartbeat, its balance, its live log — and the button that pulls its permission.",
+    body: "Every capsule you own, its records, its heartbeat and the writes behind it — and the button that pulls its permission.",
     cta: "Open the dashboard",
   },
   {
@@ -24,12 +31,13 @@ const TOUR = [
     n: "03",
     cap: "#FF4D8D",
     title: "The analyst",
-    body: "Ask what the fleet did today. It reads both subgraphs and answers in sentences, not tables.",
+    body: "Ask what the fleet did today. It reads the fleet subgraph and answers in sentences, not tables.",
     cta: "Ask a question",
   },
 ];
 
-export default function Home() {
+export default async function Home() {
+  const fleet = await loadFleet();
   return (
     <>
       {/* ---------- hero ---------- */}
@@ -57,10 +65,10 @@ export default function Home() {
 
           <div className="row wrapflex" style={{ gap: 10, marginTop: 34 }}>
             <span className="pill onblue">ENSv2 subnames</span>
-            <span className="pill onblue">EAC roles</span>
-            <span className="pill onblue">x402 checkout</span>
-            <span className="pill onblue">Two subgraphs</span>
-            <span className="pill onblue">Telegram runners</span>
+            <span className="pill onblue">Per-key EAC roles</span>
+            <span className="pill onblue">ENSIP-25/26/27</span>
+            <span className="pill onblue">OpenClaw runners</span>
+            <span className="pill onblue">Telegram</span>
           </div>
          </div>
 
@@ -74,7 +82,7 @@ export default function Home() {
                 { c: "#FF4D8D", n: "marketing", s: 62 },
               ].map((x) => (
                 <div key={x.n} style={{ textAlign: "center" }}>
-                  <Capsule size={x.s} cap={x.c} title={x.n + ".berkin.eth"} />
+                  <Capsule size={x.s} cap={x.c} title={x.n + ".capsulefleet.eth"} />
                   <div className="mono" style={{ fontSize: 11, color: "var(--muted)", marginTop: 10 }}>
                     {x.n}
                   </div>
@@ -82,12 +90,12 @@ export default function Home() {
               ))}
             </div>
             <hr className="sep" style={{ margin: "18px 0" }} />
-            <div className="label">Mint fee</div>
+            <div className="label">Cost of staying alive</div>
             <div className="wm" style={{ fontSize: 46, marginTop: 6 }}>
-              1 USDC
+              47,639
             </div>
             <div className="mono hint" style={{ marginTop: 6 }}>
-              per agent · settled in 183 ms
+              gas per heartbeat · paid by the agent itself
             </div>
           </div>
         </div>
@@ -111,7 +119,7 @@ export default function Home() {
               <svg
                 viewBox="0 0 760 215"
                 role="img"
-                aria-label="The runner writes a heartbeat to its own name every 60 seconds. The resolver checks the agent's role: if it still holds it the write lands and the runner keeps going; if the owner has revoked it the write fails with EACUnauthorizedAccountRoles and the runner halts itself."
+                aria-label="The runner writes a heartbeat to its own name every 60 seconds. The PermissionedResolver checks the agent's role: if it still holds it the write lands and the runner keeps going; if the owner has revoked it the write fails with EACUnauthorizedAccountRoles and the runner halts itself."
                 style={{ width: "100%", minWidth: 680, height: "auto", display: "block", margin: "0 auto", maxWidth: 760 }}
               >
                 <defs>
@@ -129,7 +137,7 @@ export default function Home() {
                   runner
                 </text>
                 <text x="106" y="145" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="11.5" fill="#5C6E96">
-                  trader.berkin.eth
+                  trader.capsulefleet.eth
                 </text>
 
                 {/* runner -> resolver */}
@@ -154,7 +162,7 @@ export default function Home() {
                 {/* resolver */}
                 <rect x="330" y="88" width="176" height="88" fill="#fff" stroke="#12203F" strokeWidth="3" rx="10" />
                 <text x="418" y="116" textAnchor="middle" fontFamily="Rubik, sans-serif" fontSize="13" fontWeight="700" fill="#12203F">
-                  PublicResolverV2
+                  PermissionedResolver
                 </text>
                 <text x="418" y="136" textAnchor="middle" fontFamily="'Azeret Mono', monospace" fontSize="10.5" fill="#5C6E96">
                   checks the EAC role
@@ -192,7 +200,7 @@ export default function Home() {
             </div>
             <figcaption className="hint" style={{ marginTop: 14, maxWidth: "70ch" }}>
               The full revert is <span className="mono">EACUnauthorizedAccountRoles</span> — the same error ENSv2
-              throws for any subname owner writing to a resolver it holds no role on.
+              throws for any account writing to a key it holds no role on.
             </figcaption>
           </figure>
         </div>
@@ -229,19 +237,21 @@ export default function Home() {
       </section>
 
       {/* ---------- live feed ---------- */}
+      {fleet.ok && fleet.fleet.events.length > 0 && (
       <section className="band b-shell">
         <div className="wrap">
           <div className="sec-head">
-            <p className="kicker">Read off the subgraphs</p>
+            <p className="kicker">Read off the chain</p>
             <h2>Everything an agent does leaves a row.</h2>
             <p className="lede">
-              Names and permissions are indexed on ETH Sepolia; payments are indexed on Base Sepolia. One feed, two
-              chains, no bridge between them.
+              Mints, record edits, role grants and heartbeats are all indexed on ETH Sepolia. One feed — and because
+              the permission and the write it authorises are the same story, a gap in it means something.
             </p>
           </div>
-          <ActivityFeed limit={5} />
+          <ActivityFeed events={fleet.fleet.events} now={fleet.fleet.readAt} limit={5} />
         </div>
       </section>
+      )}
     </>
   );
 }

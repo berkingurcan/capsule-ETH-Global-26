@@ -11,7 +11,9 @@ Everything below was verified against the live Sepolia beta, not from docs.
 | Parent name | `capsulefleet.eth` |
 | Our subregistry (`PermissionedRegistry`) | `0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e` |
 | Our resolver (`PermissionedResolver` proxy) | `0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3` |
-| **`CapsuleMinter`** (ours) | `0x193Bb7dB059a6f93e796d97da278465d20224819` |
+| **`CapsuleMinter`** (ours) | `0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51` — block `11669320`, verified |
+| …its ERC-7930 registry id | `0x0001000003aa36a714e114caf799f11ed61bd44fc7d498d96db62bdf51` |
+| …superseded, single-parent | ~~`0x193Bb7dB059a6f93e796d97da278465d20224819`~~ |
 | …superseded, dotted keys | ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ |
 | Parent namehash | `0x036a91f25e11db713abf00b569adb0a03c248d7b9f291430dac6807860d4a6b3` |
 | Parent DNS encoding | `0x0c63617073756c65666c6565740365746800` |
@@ -33,6 +35,117 @@ Everything below was verified against the live Sepolia beta, not from docs.
 | PermissionedResolverImpl | `0x9eae5c2730a7dd16bdd1dee6421a1b91e3b0365e` |
 | USDC (registration fee) | `0x1c7d4b196cb0c7b01d743fbc6116a902379c7238` |
 | ~~PublicResolverV2~~ | `0xe7b9…` — **do not use**, see gotcha 2 |
+
+## One minter, many parents
+
+`CapsuleMinter` used to take `parentNode` and `parentDns` as constructor arguments and
+`REGISTRY` as an immutable, which meant one deployment could only ever mint under
+`capsulefleet.eth`. It no longer holds a parent at all: any name whose owner connects it
+can issue capsules, and `dev.berkin.eth` and `trader.capsulefleet.eth` come from the same
+contract.
+
+**What changed on the ABI** — every one of these is a breaking change, and the web app
+moved with them:
+
+| Before | Now |
+|---|---|
+| `mint(label, owner, agent, config)` | `mint(registry, label, owner, agent, config)` |
+| `nodeOf(label)` / `dnsNameOf(label)` | `nodeOf(registry, label)` / `dnsNameOf(registry, label)` |
+| `isAgentAuthorized(label, agent)` | `isAgentAuthorized(registry, label, agent)` |
+| `checkResolverRoles()` | `checkResolverRoles(resolver)` |
+| `PARENT_NODE()`, `REGISTRY()`, `PARENT_DNS()` | gone — use `parentOf(registry)` |
+| — | `connectParent`, `setParentOpen`, `disconnectParent`, `readiness`, `namehash` |
+| `CapsuleMinted(node, owner, agent, …)` | `CapsuleMinted(parentNode, node, owner, agent, …)` |
+
+`parentNode` is indexed and `agent` is not: three topics is the ABI limit, and a dashboard
+showing one name's fleet filters on the parent every time it loads.
+
+### The two decisions worth knowing
+
+**A parent is registered once, not passed per mint.** `mint()` names only a registry;
+everything else about the parent was stored by `connectParent`. The obvious alternative —
+`mint(registry, resolver, parentDns, …)` — looks equivalent and is not: nothing on chain
+ties a registry to a resolver, so a caller could pair a real parent's registry with a
+resolver they control, pass every permission check against their own resolver, and register
+a label under somebody else's name. Storing the triple behind an admin check makes that
+combination unrepresentable.
+
+**The admin check is `ROLE_REGISTRAR_ADMIN` on the parent's registry.** Held by whoever
+deployed that registry — necessarily, or they could not have granted the minter
+`ROLE_REGISTRAR` in the first place. No owner table, no allowlist, no signature scheme.
+`open` then decides whether strangers may mint under a connected name: `true` for a demo
+parent people are invited to try, `false` (the default) for a name somebody owns.
+
+### The live deployment
+
+`0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51`, deployed in block `11669320` and verified on
+Etherscan. `capsulefleet.eth` is connected to it and **open**, so anyone may mint there.
+
+**The four demo capsules were deliberately NOT re-minted.** `trader`, `dev`, `marketing` and
+`analyst` are still registered through the superseded minter, still resolve, and the analyst
+runner still holds its heartbeat role — nothing about them broke. But `/fleet` enumerates
+capsules from `CapsuleMinted` logs, and those logs belong to the old minter, so the dashboard
+reads empty until something is minted through the new one. Re-minting them is
+`MintCapsules.s.sol`, which unregisters each name first; that was a deliberate call not to
+disturb four live names, not an oversight.
+
+Note also that the ENSIP-25 registration key is derived from the minter address, so the
+records on those four names name a registry that is no longer the one issuing capsules.
+
+### Deploying
+
+```
+# once, ever
+CAPSULE_SCHEMA_URI=https://…/schema/capsule-agent-v1.json \
+  forge script script/DeployCapsuleMinter.s.sol --rpc-url sepolia --broadcast
+
+# once per name, by that name's own admin
+MINTER=0x… \
+SUBREGISTRY=0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e \
+CAPSULE_RESOLVER=0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3 \
+PARENT_DNS=0x0c63617073756c65666c6565740365746800 \
+PARENT_OPEN=true \
+  forge script script/ConnectParent.s.sol --rpc-url sepolia --broadcast
+```
+
+Then set `CAPSULE_MINTER_ADDRESS` and `CAPSULE_MINTER_BLOCK` in `web/.env.local`.
+
+### Verifying against the live chain
+
+`test/CapsuleMinterFork.t.sol` forks Sepolia, impersonates `capsulefleet.eth`'s owner and
+runs grant → grant → connect → mint against the real ENS contracts. It is the only place
+the two-way registry link is checked for real; a mock that returns what `connectParent`
+wants proves nothing about ENS's actual registries.
+
+```
+forge test --match-path test/CapsuleMinterFork.t.sol --fork-url sepolia -vv
+```
+
+It skips itself when no fork is configured, so plain `forge test` stays offline.
+
+### What a user has to do before their own name works
+
+Three things, and only the last two are Capsule's:
+
+1. **A subregistry.** A `.eth` name on this deployment has none —
+   `ETHRegistry.getSubregistry("berkin")` is the zero address — and until it has one,
+   nothing can create `x.berkin.eth` by any means. `/connect` now deploys and links one:
+   a `PermissionedRegistry` (~5.3M gas) followed by both halves of gotcha 1's link.
+
+   This was left to the ENS manager app for a while, on the theory that it was ENS's
+   primitive to get right. That was wrong on the facts — the manager does not offer the
+   operation either, and of the last thousand `NameRegistered` events on this deployment
+   **zero** set a subregistry — so the advice could not be followed and a freshly bought
+   name had nowhere to go. `web/lib/capsule/registry-bytecode.ts` vendors ENS's own
+   compiled bytecode; `npm run fork:subregistry` proves the runtime code it deploys is
+   byte-identical to the registry already live under `capsulefleet.eth`.
+2. **A `PermissionedResolver`.** `/connect` deploys one through `VerifiableFactory`.
+3. **The two grants and `connectParent`.** `/connect` sends all three.
+
+`ROLE_SET_SUBREGISTRY` (`1 << 20`) and its admin bit are granted to the buyer by the
+registrar at registration, scoped to the name's own token id — so step 1 is something the
+owner can do from a browser, and only the owner. `/connect` reads that role before
+offering the step.
 
 ## Gotchas that cost us time
 
