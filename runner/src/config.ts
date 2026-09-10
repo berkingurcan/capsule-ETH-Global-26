@@ -25,11 +25,13 @@ import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
 import { shortRevert } from "./errors.js";
 import { decodeText, encodeName, resolverAbi, universalResolverAbi } from "./resolve.js";
 import {
+  POLICY_KEYS,
   RECORD_KEYS,
   REQUIRED_TEXT_KEYS,
   TEXT_KEYS,
   parseHeartbeatSequence,
 } from "./records.js";
+import { parseSpendPolicy, type SpendPolicy } from "./policy.js";
 import { modelRefProblems, parseModelRef, type ModelRef } from "./providers.js";
 
 // Re-exported so the rest of the runner keeps importing it from here, which is
@@ -69,6 +71,17 @@ export type CapsuleConfig = {
   /** A pointer such as "cap_8f3d1a". Never the prompt body — that stays off chain. */
   promptRef: string;
   heartbeat: Heartbeat;
+  /**
+   * What this agent may spend, read off the same name as everything else.
+   *
+   * Never a reason to fail the load. The policy records are optional — no
+   * deployed minter writes them and every capsule that predates them has none —
+   * so an absent, empty or malformed value resolves to "cannot spend" and is
+   * reported rather than thrown. A capsule that refused to boot because its
+   * owner mistyped a spending cap would be a capsule taken down by a typo, and
+   * on a dashboard that is indistinguishable from a recall.
+   */
+  spend: SpendPolicy;
 };
 
 export class ConfigError extends Error {
@@ -210,5 +223,9 @@ export async function loadCapsuleConfig(
     endpoint: text[RECORD_KEYS.endpointCapsule]!,
     promptRef: text[RECORD_KEYS.prompt]!,
     heartbeat: { raw: heartbeatRaw, sequence: parseHeartbeatSequence(heartbeatRaw) },
+    // Below the `problems.length > 0` throw on purpose. These two records are
+    // the only ones on the name whose absence is normal, and `parseSpendPolicy`
+    // reports rather than raises for the same reason — see the field comment.
+    spend: parseSpendPolicy(text[POLICY_KEYS.spendCap] ?? "", text[POLICY_KEYS.spendAllow] ?? ""),
   };
 }

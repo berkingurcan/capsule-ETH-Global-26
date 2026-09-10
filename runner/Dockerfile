@@ -43,6 +43,18 @@ RUN npm ci --include=dev
 COPY --chown=node:node tsconfig.json ./
 COPY --chown=node:node src ./src
 
+# `capsule-wallet`, which the gateway's child runs to ask the supervisor to
+# spend. It lands in its own directory because that directory goes on the
+# child's PATH — see BIN_PATH in src/openclaw.ts — and putting src/ on a PATH
+# would expose every module in it as a command.
+#
+# Deliberately dependency-free plain .mjs rather than TypeScript: it is executed
+# from the gateway's working directory, and `node --import tsx` resolves tsx
+# relative to the caller. The mode bit matters as much as the copy — an
+# unexecutable file on PATH is "command not found" at the moment an agent is
+# trying to move money.
+COPY --chown=node:node --chmod=755 bin ./bin
+
 # Exec form, and one process.
 #
 # `npm start` would break the runner's shutdown outright: npm does not forward

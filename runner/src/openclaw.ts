@@ -26,14 +26,16 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { CHAIN } from "./chain.js";
 import type { CapsuleConfig } from "./config.js";
 import { composePersona, type CapsuleStatus } from "./persona.js";
 import { envVarFor, isBuiltInProvider } from "./providers.js";
 import type { RuntimeCredentials } from "./runtime.js";
+import { SKILL_NAME, composeWalletSkill } from "./skill.js";
 
 /** Where the gateway looks unless OPENCLAW_CONFIG_PATH says otherwise. */
 export const CONFIG_PATH = join(homedir(), ".openclaw", "openclaw.json");
@@ -58,6 +60,37 @@ export const WORKSPACE_PATH = join(homedir(), ".openclaw", "workspace");
  * `./persona.ts` for what goes in it and in what order.
  */
 export const PERSONA_PATH = join(WORKSPACE_PATH, "AGENTS.md");
+
+/**
+ * Where OpenClaw looks for workspace skill packs.
+ *
+ * Same workspace the persona lives in, so this needs no new mechanism and no
+ * config key: one more file, written before the spawn, beside the one that
+ * already tells the agent who it is.
+ */
+export const WALLET_SKILL_PATH = join(WORKSPACE_PATH, "skills", SKILL_NAME, "SKILL.md");
+
+/**
+ * The directory holding `capsule-wallet`, prepended to the child's PATH.
+ *
+ * Derived from this module rather than hardcoded to `/capsule/bin`, because the
+ * supervisor runs from a checkout as often as from the image and an agent that
+ * can only spend in production is an agent nobody can rehearse with.
+ */
+export const BIN_PATH = fileURLToPath(new URL("../bin", import.meta.url));
+
+/**
+ * What the child needs to reach the wallet broker.
+ *
+ * A URL and a token cross into the gateway's environment; the key does not, and
+ * this type is the whole reason that stays true — there is nowhere in it to put
+ * one. See wallet.ts for why the request crosses the wall instead of the
+ * credential.
+ */
+export type WalletAccess = {
+  url: string;
+  token: string;
+};
 
 /**
  * How long the gateway gets to stop politely before it is killed.
@@ -228,6 +261,7 @@ export function buildOpenClawConfig(
 export function buildOpenClawEnv(
   config: CapsuleConfig,
   credentials: RuntimeCredentials,
+  wallet?: WalletAccess,
 ): Record<string, string> {
   const env: Record<string, string> = {};
 
@@ -269,6 +303,25 @@ export function buildOpenClawEnv(
   // of from a node.
   const agentRpc = process.env.CAPSULE_AGENT_RPC_URL?.trim();
   if (agentRpc !== undefined && agentRpc !== "") env.CAPSULE_RPC_URL = agentRpc;
+
+  // The teller window's address, and a ticket to use it.
+  //
+  // Read the two things that are NOT here. There is no private key, and there is
+  // no RPC endpoint the child could use to broadcast one if it found one. What
+  // crosses is a loopback URL and a token that authorises nothing except the
+  // right to make a request the supervisor is free to refuse — and refuses by
+  // default, because `agent-spend-cap` is absent on every name until an owner
+  // writes it.
+  //
+  // The token is minted per boot in wallet.ts and never logged, exactly like
+  // OPENCLAW_GATEWAY_TOKEN above. A tool that dumps its own environment into a
+  // chat therefore leaks a credential that dies with the process and that a
+  // stranger cannot reach anyway: nothing outside this container can open a
+  // socket on 127.0.0.1 inside it.
+  if (wallet !== undefined) {
+    env.CAPSULE_WALLET_URL = wallet.url;
+    env.CAPSULE_WALLET_TOKEN = wallet.token;
+  }
 
   // Without this the gateway refuses to start at all. Measured against 2026.9.3:
   // it detects a container, defaults to bind=auto, and exits with "Refusing to
@@ -314,6 +367,38 @@ export function buildOpenClawEnv(
 export async function writePersona(document: string, path = PERSONA_PATH): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const body = document.endsWith("\n") ? document : `${document}\n`;
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, body, { mode: 0o600 });
+  await rename(temporary, path);
+}
+
+/**
+ * Write the wallet skill pack, or take it away.
+ *
+ * Written on every apply and removed when no broker is running, and the removal
+ * is the half worth explaining. Skill packs persist in the workspace, and the
+ * workspace outlives a restart on a Fly volume — so a capsule restarted with
+ * `CAPSULE_WALLET=off` would otherwise keep a skill file promising a command
+ * that no longer exists, and spend its turns running a binary that is not on
+ * its PATH and reporting the failure as though it were a refusal.
+ *
+ * Same temporary-and-rename as the persona, for the same reason: the reader in
+ * a torn-write window is a language model being told what it may spend.
+ */
+export async function writeWalletSkill(
+  wallet: WalletAccess | undefined,
+  path = WALLET_SKILL_PATH,
+): Promise<void> {
+  if (wallet === undefined) {
+    await rm(path, { force: true });
+    return;
+  }
+
+  await mkdir(dirname(path), { recursive: true });
+  // By name, not by absolute path: `BIN_PATH` is on the child's PATH and the
+  // two facts have to agree. Telling the model an absolute path would work
+  // until the image layout changed and then fail silently.
+  const body = composeWalletSkill({ command: SKILL_NAME });
   const temporary = `${path}.${process.pid}.tmp`;
   await writeFile(temporary, body, { mode: 0o600 });
   await rename(temporary, path);
@@ -434,10 +519,18 @@ export class Gateway {
     config: CapsuleConfig,
     credentials: RuntimeCredentials,
     persona: string,
+    wallet?: WalletAccess,
   ): Promise<void> {
     const document = buildOpenClawConfig(config, credentials);
-    this.#env = buildOpenClawEnv(config, credentials);
+    // Held in #env rather than in a field of its own: a restart re-uses the
+    // environment it was given, so the broker survives one without being
+    // re-plumbed.
+    this.#env = buildOpenClawEnv(config, credentials, wallet);
     await writeOpenClawConfig(document);
+    // Before the spawn, like the persona. OpenClaw watches skill roots, but a
+    // pack that arrives after the first message is a pack the agent did not have
+    // when it was first asked what it can do.
+    await writeWalletSkill(wallet);
     // Before the spawn, always. The gateway reads this file at startup and
     // creates its own if it is missing, and an agent that boots once with a
     // generated persona has already introduced itself as somebody else.
@@ -501,7 +594,12 @@ export class Gateway {
       // this system that must never leave the supervisor: it is what proves the
       // agent's identity to the chain and to the control plane.
       env: {
-        PATH: process.env.PATH ?? "",
+        // `capsule-wallet` first, so the model can run it by name rather than by
+        // an absolute path it would have to be told and could mistype. Prepended
+        // rather than replacing PATH: the gateway needs its own binaries, and a
+        // capsule whose agent cannot run `git` because we tightened its PATH is
+        // a capsule with a worse bug than the one we were preventing.
+        PATH: `${BIN_PATH}:${process.env.PATH ?? ""}`,
         HOME: process.env.HOME ?? homedir(),
         ...this.#env,
       },
