@@ -23,7 +23,8 @@
     "check:provision": "node --env-file=.env.local --import tsx scripts/check-provision.ts",
     "check:register": "node --env-file=.env.local --import tsx scripts/check-register.ts",
     "fork:register": "node --import tsx scripts/fork-register.ts",
-    "fork:subregistry": "node --import tsx scripts/fork-subregistry.ts"
+    "fork:subregistry": "node --import tsx scripts/fork-subregistry.ts",
+    "fix:endpoint": "node --env-file=.env.local --import tsx scripts/fix-endpoint.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
