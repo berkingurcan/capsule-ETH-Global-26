@@ -32,13 +32,27 @@
  * say so loudly, and the gateway still has to reach `ready` — a capsule that
  * only starts when the internet is perfect is one that stops on a bad minute.
  */
-import { readFile } from "node:fs/promises";
-import { Gateway, PERSONA_PATH, buildOpenClawConfig, buildOpenClawEnv } from "../src/openclaw.js";
+import { spawnSync } from "node:child_process";
+import { access, readFile } from "node:fs/promises";
+import {
+  Gateway,
+  PERSONA_PATH,
+  WALLET_SKILL_PATH,
+  buildOpenClawConfig,
+  buildOpenClawEnv,
+  writeWalletSkill,
+} from "../src/openclaw.js";
 import { Secret } from "../src/secret.js";
 import type { CapsuleConfig } from "../src/config.js";
 import type { RuntimeCredentials } from "../src/runtime.js";
 
 const SENTINEL = "CAPSULE-PERSONA-SENTINEL";
+
+const exists = (path: string): Promise<boolean> =>
+  access(path).then(
+    () => true,
+    () => false,
+  );
 
 /** How long the gateway gets to reach `ready` before we call it failed. */
 const SETTLE_MS = 20_000;
@@ -106,12 +120,38 @@ async function main() {
     failures.push("the gateway environment does not say which capsule it is");
   }
 
+  // The wallet is the one thing that deliberately crosses this boundary, so it
+  // is checked here rather than trusted. What goes over is a loopback URL and a
+  // token; what must not is the key, and the scan above runs against this
+  // environment too.
+  const wallet = { url: "http://127.0.0.1:8899", token: "a".repeat(64) };
+  const walletEnv = buildOpenClawEnv(config, credentials, wallet);
+  if ("AGENT_KEY" in walletEnv) {
+    failures.push("AGENT_KEY reached the gateway environment alongside the wallet");
+  }
+  if (walletEnv.CAPSULE_WALLET_URL !== wallet.url || walletEnv.CAPSULE_WALLET_TOKEN !== wallet.token) {
+    failures.push("the gateway cannot reach the wallet broker");
+  }
+  // The supervisor's RPC URL usually carries a provider key in its path. Handing
+  // it over would give a process that runs model-chosen tools a way to broadcast
+  // a transaction of its own, which is the thing the broker exists to mediate.
+  if (Object.values(walletEnv).includes(process.env.SEPOLIA_RPC_URL ?? "\u0000")) {
+    failures.push("SEPOLIA_RPC_URL reached the gateway environment");
+  }
+  for (const [name, value] of Object.entries(walletEnv)) {
+    if (/^0x[0-9a-fA-F]{64}$/.test(value)) {
+      failures.push(`${name} looks like a 32-byte private key`);
+    }
+  }
+
   const gateway = new Gateway({
     info: (message) => console.log(`   ${message}`),
     warn: (message) => console.warn(`⚠️  ${message}`),
   });
 
-  await gateway.apply(config, credentials, `${SENTINEL}\nYou are smoke.capsulefleet.eth.`);
+  // With the wallet, so the skill pack and the child's wallet environment are
+  // produced by the same call the supervisor makes rather than by the test.
+  await gateway.apply(config, credentials, `${SENTINEL}\nYou are smoke.capsulefleet.eth.`, wallet);
 
   const onDisk = await readFile(PERSONA_PATH, "utf8");
   if (!onDisk.includes(SENTINEL)) {
@@ -132,6 +172,57 @@ async function main() {
     failures.push("the agent-prompt body was placed above the identity the supervisor wrote");
   }
 
+  // The lookup that actually happens, done the way it actually happens.
+  //
+  // This assertion exists because its absence cost a deployed capsule. The
+  // supervisor prepends /capsule/bin to the child's PATH, which is true and
+  // insufficient: OpenClaw runs model-chosen commands through `sh -lc`, and a
+  // login shell sources /etc/profile and replaces PATH wholesale. Every other
+  // check passed — the broker was up, the skill file was right, the status block
+  // rendered the policy correctly — and the agent still reported the command as
+  // unavailable, because the only PATH that matters is the one a login shell
+  // ends up with.
+  //
+  // `command -v` and not `test -x`: the question is not whether the file exists,
+  // it is whether this exact lookup resolves.
+  const lookup = spawnSync("sh", ["-lc", "command -v capsule-wallet"], { encoding: "utf8" });
+  if (lookup.status !== 0 || lookup.stdout.trim() === "") {
+    failures.push("capsule-wallet does not resolve in a login shell — this is how the gateway runs it");
+  }
+
+  // And it has to actually execute, not merely resolve. An extensionless symlink
+  // to an ESM file is a module-type question Node answers from the realpath, and
+  // getting that wrong is a file that resolves and then refuses to run.
+  const runs = spawnSync("sh", ["-lc", "capsule-wallet --help"], { encoding: "utf8" });
+  if (runs.status !== 0 || !runs.stdout.includes("capsule-wallet")) {
+    failures.push(`capsule-wallet resolves but does not run — ${(runs.stderr || "").split("\n")[0]}`);
+  }
+
+  // The pack the one `apply` above wrote, because it was given a broker.
+  if (!(await exists(WALLET_SKILL_PATH))) {
+    failures.push("no wallet skill was written for a capsule that has a broker");
+  } else {
+    const skill = await readFile(WALLET_SKILL_PATH, "utf8");
+    // Named by the command the model will actually type, which is the symlink on
+    // its PATH — not the .mjs behind it and not an absolute path into the image.
+    for (const fact of ["capsule-wallet status", "agent-spend-cap", "agent-spend-allow"]) {
+      if (!skill.includes(fact)) failures.push(`the wallet skill never mentions ${fact}`);
+    }
+  }
+
+  // And taken away again when the broker goes. Exercised directly rather than
+  // through a second `apply`, which would restart the gateway and break the
+  // one-start invariant this file checks at the end.
+  //
+  // The removal is the half worth testing. A workspace outlives a restart on a
+  // Fly volume, so a capsule restarted with CAPSULE_WALLET=off would otherwise
+  // keep instructions for a command that is no longer on its PATH, and spend its
+  // turns reporting "command not found" as though it were a refusal.
+  await writeWalletSkill(undefined);
+  if (await exists(WALLET_SKILL_PATH)) {
+    failures.push("the wallet skill survived a capsule losing its broker");
+  }
+
   // A status refresh must reach the file without restarting the child — it runs
   // every tick, and a gateway that restarted on each one would never answer a
   // message.
@@ -145,6 +236,17 @@ async function main() {
     heartbeat: "beat-2",
     heartbeatSeconds: 28_800,
     gatewayFailing: false,
+    // Enabled here on purpose. The interesting rendering is the one with a live
+    // cap in it, and this is the only test that reads the composed file off disk
+    // the way the model does.
+    spend: {
+      policy: "0.010000 ETH per transaction · any address",
+      enabled: true,
+      spendable: "0.004000 ETH",
+      spentThisRun: "0.000000",
+      transactions: 0,
+      problems: [],
+    },
     checkedAt: new Date(),
   });
   const refreshed = await readFile(PERSONA_PATH, "utf8");

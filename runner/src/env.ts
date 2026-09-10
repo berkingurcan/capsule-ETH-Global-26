@@ -10,7 +10,7 @@
  * quietly substitutes a value it was not given is a runner that fails in a way
  * that looks like a revoked permission.
  */
-import { getAddress, isHex, type Address, type Hex } from "viem";
+import { getAddress, isHex, parseEther, type Address, type Hex } from "viem";
 
 export class MissingEnvError extends Error {
   readonly varName: string;
@@ -64,6 +64,24 @@ export type RunnerEnv = {
    * chain stays the source of truth for a deployed agent.
    */
   endpointOverride: string | undefined;
+  /**
+   * The loopback port the wallet broker listens on, or undefined when the
+   * operator turned it off with `CAPSULE_WALLET=off`.
+   *
+   * Off is a real position and not the same as a zero cap. A zero cap is the
+   * owner saying "not now" on chain and is reversible with one setText; this is
+   * the operator saying the capability does not exist in this deployment, and
+   * with it unset the broker never starts, the CLI is never on the child's PATH
+   * and the skill file is never written. An agent that cannot find the tool
+   * says so honestly rather than reporting a permission problem.
+   */
+  walletPort: number | undefined;
+  /**
+   * Total value this process may move in one run, in wei. Optional — unset
+   * means ten times whatever the on-chain cap currently is. See
+   * DEFAULT_CEILING_MULTIPLE in policy.ts for why a ceiling exists at all.
+   */
+  spendCeiling: bigint | undefined;
 };
 
 export function loadEnv(): RunnerEnv {
@@ -132,6 +150,35 @@ export function loadEnv(): RunnerEnv {
     }
   }
 
+  // Defaulted rather than required, unlike everything above it. The rule that
+  // every value must be given exists so a runner cannot quietly substitute a
+  // value that changes what it *is* — a name, a key, an endpoint. A loopback
+  // port number is not one of those: it is invisible outside the container and
+  // no capsule behaves differently for having a different one.
+  const rawWallet = optionalEnv("CAPSULE_WALLET") ?? "8899";
+  let walletPort: number | undefined;
+  if (rawWallet.toLowerCase() === "off") {
+    walletPort = undefined;
+  } else {
+    walletPort = Number(rawWallet);
+    if (!Number.isSafeInteger(walletPort) || walletPort < 1024 || walletPort > 65_535) {
+      throw new InvalidEnvError("CAPSULE_WALLET", 'must be a port between 1024 and 65535, or "off"');
+    }
+  }
+
+  const rawCeiling = optionalEnv("CAPSULE_SPEND_CEILING");
+  let spendCeiling: bigint | undefined;
+  if (rawCeiling !== undefined) {
+    try {
+      spendCeiling = parseEther(rawCeiling);
+    } catch {
+      throw new InvalidEnvError("CAPSULE_SPEND_CEILING", "is not a decimal ETH amount");
+    }
+    if (spendCeiling < 0n) {
+      throw new InvalidEnvError("CAPSULE_SPEND_CEILING", "must not be negative");
+    }
+  }
+
   return {
     rpcUrl,
     agentKey,
@@ -140,5 +187,7 @@ export function loadEnv(): RunnerEnv {
     tickSeconds,
     heartbeatSeconds,
     endpointOverride,
+    walletPort,
+    spendCeiling,
   };
 }

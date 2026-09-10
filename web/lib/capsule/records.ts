@@ -70,6 +70,50 @@ export type RecordKeyName = keyof typeof RECORD_KEYS;
 export const HEARTBEAT_KEY = RECORD_KEYS.heartbeat;
 
 /**
+ * The spending policy, as records on the name.
+ *
+ * Deliberately NOT in `RECORD_KEYS`, and the distinction is load-bearing rather
+ * than tidy: `RECORD_KEYS` is what `CapsuleMinter` writes at mint time, and
+ * `check-records.ts` asserts every one of them has a `KEY_*` constant in the
+ * Solidity — a key the minter never writes is a key no name would ever carry.
+ * These two are the other kind of key. The minter does not write them, no
+ * deployed contract knows they exist, and a capsule minted before they did
+ * behaves exactly as it always has.
+ *
+ * They work anyway because `CapsuleMinter.mint` already grants the owner
+ * name-level `ROLE_SET_TEXT` plus its admin bit on their own name. So an owner
+ * can set these today, on names that already exist, with one `setText` and no
+ * redeploy — and the agent cannot, because its own grant is per-key and covers
+ * `agent-heartbeat` alone.
+ *
+ * That asymmetry is the whole design. The agent holds a live write permission
+ * on its own name and still cannot raise its own spending limit, for the same
+ * reason and through the same mechanism that it cannot rewrite its own
+ * `agent-prompt`. Enforced by the resolver, not by the process holding the key.
+ */
+export const POLICY_KEYS = {
+  /**
+   * The gate. A decimal ETH amount — `"0.01"` — and the most a single
+   * transaction may move. Absent, empty or unparseable means zero, which means
+   * the agent cannot spend at all. Spending is off until an owner turns it on.
+   */
+  spendCap: "agent-spend-cap",
+  /**
+   * The narrowing. A comma-separated list of addresses the agent may send to.
+   * Absent means "anywhere", which is safe only because the cap above already
+   * bounds every single transfer; present means those addresses and no others.
+   *
+   * Contract calls are the exception and are never covered by "anywhere" — see
+   * `checkSpend` in policy.ts. Calldata this runner does not interpret can move
+   * value the ETH cap says nothing about, so the target has to be named.
+   */
+  spendAllow: "agent-spend-allow",
+} as const;
+
+/** Read every tick, in the same multicall as everything else. */
+export const POLICY_TEXT_KEYS = [POLICY_KEYS.spendCap, POLICY_KEYS.spendAllow] as const;
+
+/**
  * Records the runner refuses to boot without.
  *
  * The heartbeat is deliberately absent: a freshly minted name has never been
@@ -83,8 +127,19 @@ export const REQUIRED_TEXT_KEYS = [
   RECORD_KEYS.prompt,
 ] as const;
 
-/** Every text key read in the boot multicall, in the order the results come back. */
-export const TEXT_KEYS = [...REQUIRED_TEXT_KEYS, HEARTBEAT_KEY] as const;
+/**
+ * Every text key read in the boot multicall, in the order the results come back.
+ *
+ * The policy keys ride along on the end rather than in a second call. They are
+ * read on every tick for the same reason the model reference is: the owner
+ * edits them from a wallet on a live agent, and a cap lowered to zero has to
+ * take effect within one tick or it is not a kill switch, it is a request.
+ */
+export const TEXT_KEYS = [
+  ...REQUIRED_TEXT_KEYS,
+  HEARTBEAT_KEY,
+  ...POLICY_TEXT_KEYS,
+] as const;
 
 /**
  * ENSIP-27 node classification. Pascal-case, from the spec's recommended

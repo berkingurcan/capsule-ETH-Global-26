@@ -12,6 +12,8 @@ agent-model              which brain              → swap it on chain, no redep
 agent-endpoint[capsule]  where the prompt lives
 agent-prompt             cap_8f3d1a               → a pointer; the body stays off chain
 agent-heartbeat          the one key it may write → beat-1, beat-2, beat-3…
+agent-spend-cap          what it may spend        → 0.01, or nothing at all
+agent-spend-allow        where it may send it     → an allowlist, or anywhere
 ```
 
 ## What the agent knows about itself
@@ -54,12 +56,15 @@ owner tops it up, and a beat forces a fresh read.
 for tools and shell commands rather than prose. Every one is public: three are
 text records anybody can resolve and the fourth is the address they point at.
 
-`AGENT_KEY` is not among them and never will be. The agent cannot sign anything;
-the supervisor signs `agent-heartbeat` on its behalf and nothing else. Note the
-shape of that guard: `buildOpenClawEnv` builds the child's environment from
-nothing rather than filtering the supervisor's, so a new secret is excluded by
-default instead of having to be remembered. `dev/gateway-smoke.ts` asserts it,
-including a scan for anything shaped like a 32-byte key.
+`AGENT_KEY` is not among them and never will be. The agent cannot sign
+anything — it asks the supervisor to, and the supervisor decides. Note the shape
+of that guard: `buildOpenClawEnv` builds the child's environment from nothing
+rather than filtering the supervisor's, so a new secret is excluded by default
+instead of having to be remembered. `dev/gateway-smoke.ts` asserts it, including
+a scan for anything shaped like a 32-byte key.
+
+What crosses instead is a loopback URL and a per-boot token — see **The wallet**
+below.
 
 `CAPSULE_RPC_URL` is the one exception that is opt-in. The supervisor's own
 `SEPOLIA_RPC_URL` usually carries a provider key in its path, which makes it a
@@ -83,6 +88,82 @@ wallet degrades it to probe-only rather than stopping it, and says so in the log
 every time it tries, because a heartbeat that stops advancing for want of gas
 looks exactly like a revoked one.
 
+## The wallet
+
+The agent has always had one — it pays for its own heartbeat. What it did not
+have was any way for the *model* to reach it, and the fix is deliberately not
+"give the model the key".
+
+```
+gateway (no key)                    supervisor (holds AGENT_KEY)
+  capsule-wallet send … ──HTTP──>   checkSpend() against the records
+                                      └─ allowed → signs, and logs the hash
+                                      └─ refused → says which record refused
+```
+
+`capsule-wallet` is on the child's PATH; the key is not in its environment and
+there is no RPC endpoint there to broadcast one with. A request crosses the
+wall, never a credential.
+
+### The limit is a record on the name
+
+| Record | What it does |
+|---|---|
+| `agent-spend-cap` | Most one transaction may move, as decimal ETH. Absent, `0`, or unreadable means the agent cannot spend at all. |
+| `agent-spend-allow` | Comma-separated addresses it may send to. Absent means anywhere — which is bounded because the cap already bounds every transfer. Contract calls are never covered by "anywhere": the target has to be named, because calldata moves things a cap denominated in ETH does not measure. |
+
+**No contract changed for this.** `CapsuleMinter.mint` already grants the owner
+name-level `ROLE_SET_TEXT` and its admin bit, so these work on names that were
+minted before they existed, with one `setText` and no redeploy. They are
+deliberately not in `RECORD_KEYS` — nothing on chain writes them — see the note
+in `src/records.ts`.
+
+The agent cannot write them. Its grant is per-key and covers `agent-heartbeat`
+alone, which is the same boundary that already stops it rewriting its own
+`agent-prompt`. So an agent holding a live write permission on its own name
+still cannot raise its own spending limit.
+
+```bash
+# turn spending on, as the owner, from ../contracts
+cast send --rpc-url $SEPOLIA_RPC_URL --private-key $PRIVATE_KEY \
+  $CAPSULE_RESOLVER "setText(bytes32,string,string)" $NODE "agent-spend-cap" "0.01"
+
+# and off again — within one tick, no restart
+cast send … "setText(bytes32,string,string)" $NODE "agent-spend-cap" "0"
+```
+
+That second command is a second kill switch, and it is not the recall. The
+recall stops the agent; this leaves it running, authorized and beating, and
+takes its hands away. Watch for `🔄 wallet off · …` in the log.
+
+### What the supervisor refuses regardless of the records
+
+- **Contract creation**, and any transaction to the name's own resolver.
+- **Anything past the per-run ceiling** — ten times the cap unless
+  `CAPSULE_SPEND_CEILING` says otherwise. The cap bounds one transfer; nothing
+  in it bounds a thousand, and the usual cause of a thousand is a tool loop
+  rather than a person.
+- **Anything that would eat the heartbeat reserve** — fifty beats of gas, held
+  back. This is the one that protects the whole thesis: a broke agent and a
+  revoked agent both stop writing `agent-heartbeat`, so an agent that could
+  spend its last wei would be manufacturing that confusion with its own hands.
+
+Every signed transaction is logged on the supervisor's own stream, next to the
+beats, and the model cannot turn that off.
+
+### Testing it
+
+```bash
+npm run dev:wallet          # anvil, 23 checks, cleans up after itself
+```
+
+Real signed transactions against a local chain: the cap, the allowlist, the
+resolver ban, the reserve, the ceiling, a malformed record failing closed, and
+five concurrent sends landing on five different nonces. That last one does not
+reproduce without concurrency and is the reason `src/serial.ts` exists — the
+heartbeat and the agent share one account, and viem reads the pending nonce at
+send time.
+
 ## Environment
 
 Copy `.env.example` to `.env`. Every value is required except the last two, and
@@ -98,6 +179,8 @@ given is one that fails in a way that looks like a revocation.
 | `TICK_SECONDS` | probe cadence. Default 30, minimum 5 |
 | `HEARTBEAT_SECONDS` | write cadence. Default 28800 (3/day); `60` for a demo. Must be >= `TICK_SECONDS` |
 | `CAPSULE_AGENT_RPC_URL` | an endpoint the *agent* may spend, reaching the gateway as `CAPSULE_RPC_URL`. Never `SEPOLIA_RPC_URL` — see below |
+| `CAPSULE_WALLET` | loopback port for the wallet broker, or `off`. Default 8899 |
+| `CAPSULE_SPEND_CEILING` | ETH this process may move in one run. Default: 10× the cap |
 | `CAPSULE_ENDPOINT_OVERRIDE` | dev only, announced in the logs when set |
 
 ## Commands
@@ -111,6 +194,7 @@ given is one that fails in a way that looks like a revocation.
 | `npm run prompt` | fetch the prompt and print nothing that matters |
 | `npm run heartbeat` | write one beat on chain, by hand. The loop does this on its own now |
 | `npm run dev:prompt-server` | local stand-in for the prompt service |
+| `npm run dev:wallet` | the wallet broker against a throwaway anvil |
 | `npm run typecheck` | |
 
 ## Local run

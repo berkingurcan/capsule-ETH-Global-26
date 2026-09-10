@@ -31,9 +31,13 @@ import { ConfigError, loadCapsuleConfig, type CapsuleConfig } from "./config.js"
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked, type HeartbeatVerdict } from "./halt.js";
-import { LOW_BEATS, heartbeatValue, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
+import { BEAT_GAS, LOW_BEATS, heartbeatValue, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
 import { HEARTBEAT_KEY } from "./records.js";
-import { Gateway, runtimeProblems, telegramIsOpen } from "./openclaw.js";
+import { Gateway, runtimeProblems, telegramIsOpen, type WalletAccess } from "./openclaw.js";
+import { describePolicy, spendHeadline, spendable } from "./policy.js";
+import type { SpendStatus } from "./persona.js";
+import { Serializer } from "./serial.js";
+import { WalletBroker } from "./wallet.js";
 import { PromptCache, PromptError } from "./prompt.js";
 import { RuntimeError, describeCredentials, fetchRuntime, type RuntimeCredentials } from "./runtime.js";
 import { describeSecret } from "./secret.js";
@@ -89,17 +93,32 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 async function funding(
   client: PublicClient,
   agent: Address,
-): Promise<{ text: string; low: boolean; ok: boolean }> {
+): Promise<{ text: string; low: boolean; ok: boolean; balance: bigint; gasPrice: bigint | undefined }> {
   try {
     const { balance, gasPrice, beats, low } = await readFunding(client, agent);
-    return { text: `${eth(balance)} · ~${count(beats)} beats at ${gwei(gasPrice)}`, low, ok: true };
+    return {
+      text: `${eth(balance)} · ~${count(beats)} beats at ${gwei(gasPrice)}`,
+      low,
+      ok: true,
+      // Raw as well as formatted. The spendable figure in the agent's status
+      // block is derived from these two, and re-reading them for it would double
+      // this function's cost to answer a question it has already asked.
+      balance,
+      gasPrice,
+    };
   } catch (error) {
     // `ok` exists because the two callers want different things from a failed
     // read. A log line can print "balance unreadable" and move on; the agent's
     // own status file must not, because "balance unreadable — HTTP 429" sitting
     // in a table headed *Wallet balance* is how a model ends up telling its
     // owner that is what it holds.
-    return { text: `balance unreadable — ${shortRevert(error)}`, low: false, ok: false };
+    return {
+      text: `balance unreadable — ${shortRevert(error)}`,
+      low: false,
+      ok: false,
+      balance: 0n,
+      gasPrice: undefined,
+    };
   }
 }
 
@@ -119,8 +138,9 @@ async function reckon(args: {
   ticks: number;
   beats: number;
   gateway: Gateway;
+  broker: WalletBroker | undefined;
 }): Promise<HeartbeatVerdict> {
-  const { error, client, config, agent, ticks, beats, gateway } = args;
+  const { error, client, config, agent, ticks, beats, gateway, broker } = args;
   const verdict = classifyHeartbeatFailure(error);
 
   if (verdict === "unfunded") {
@@ -158,6 +178,11 @@ async function reckon(args: {
   await gateway.stop();
   console.log(`🔴 gateway    stopped — the bot is offline`);
 
+  // The hands go with it. A recalled agent whose broker outlived it could still
+  // be asked to sign by anything left holding the token, and a transaction sent
+  // after the halt line is printed is a transaction nobody can explain.
+  await broker?.stop();
+
   console.log(
     `🔴 halted     ${config.name} · ${plural(ticks, "tick")}, ${plural(beats, "beat")} this run · last ${config.heartbeat.raw || "(never beaten)"}`,
   );
@@ -184,6 +209,12 @@ async function main() {
   const client = createRunnerClient(env.rpcUrl);
   const walletClient = createRunnerWallet(env.rpcUrl, account);
   const prompts = new PromptCache();
+
+  // One account, two writers. Every transaction this process sends — the
+  // heartbeat on its timer and whatever the agent asks for on no timer at all —
+  // goes through here, because viem reads the pending nonce at send time and
+  // two overlapping sends read the same one. See serial.ts.
+  const transactions = new Serializer();
   const gateway = new Gateway({
     info: (message) => console.log(`   ${stamp()}  ${message}`),
     warn: (message) => console.warn(`⚠️  ${stamp()}  ${message}`),
@@ -203,6 +234,66 @@ async function main() {
   }
 
   const endpoint = env.endpointOverride ?? config.endpoint;
+
+  /**
+   * The wallet broker, or nothing.
+   *
+   * Created here rather than at the top because it reads the policy and the
+   * resolver off `config`, and neither exists until the name has been loaded.
+   * Both are passed as functions, not values: the tick loop reassigns `config`
+   * every 30 seconds, and a broker holding a copy from boot would enforce a cap
+   * its owner lowered an hour ago.
+   */
+  const broker =
+    env.walletPort === undefined
+      ? undefined
+      : new WalletBroker({
+          publicClient: client,
+          walletClient,
+          agent: account.address,
+          port: env.walletPort,
+          serializer: transactions,
+          policy: () => config.spend,
+          resolver: () => config.resolver,
+          ceiling: env.spendCeiling,
+          log: {
+            info: (message) => console.log(`   ${stamp()}  ${message}`),
+            warn: (message) => console.warn(`⚠️  ${stamp()}  ${message}`),
+          },
+        });
+
+  /**
+   * The balance and gas price behind `spendable`, as last read.
+   *
+   * `funding()` already fetches both on its own cadence and throws neither away
+   * nor upward — it formats them into a log line. These two hold the raw values
+   * so the spendable figure can be recomputed without a third round trip.
+   */
+  let lastBalance = 0n;
+  let lastGasPrice: bigint | undefined;
+
+  /**
+   * What the agent is told about its own spending, as of now.
+   *
+   * Rebuilt on every snapshot rather than cached, because two of its four
+   * numbers move without anything in this loop being notified: the policy comes
+   * off the chain on the tick, and the run total moves whenever the agent
+   * spends, which happens on the broker's thread and not on this one.
+   */
+  const spendStatus = (gasPrice: bigint | undefined): SpendStatus | undefined => {
+    if (broker === undefined) return undefined;
+    return {
+      policy: describePolicy(config.spend),
+      enabled: config.spend.cap > 0n,
+      spendable:
+        gasPrice === undefined
+          ? undefined
+          : `${Number(formatEther(spendable({ balance: lastBalance, gasPrice, beatGas: BEAT_GAS, policy: config.spend }))).toFixed(6)} ETH`,
+      spentThisRun: Number(formatEther(broker.spent)).toFixed(6),
+      transactions: broker.sent,
+      problems: config.spend.problems,
+    };
+  };
 
   // The last credential set that loaded cleanly. Re-fetched only when the model
   // reference on chain changes, for the same reason the prompt is: the record is
@@ -257,11 +348,24 @@ async function main() {
 
     const gas = await funding(client, account.address);
     cash = { text: gas.ok ? gas.text : undefined, low: gas.low, at: Date.now() };
+    lastBalance = gas.balance;
+    lastGasPrice = gas.gasPrice;
     console.log(
       gas.low
         ? `⚠️  gas        ${gas.text} — under ${LOW_BEATS}. Fund ${account.address} or the heartbeat stops`
         : `   gas        ${gas.text}`,
     );
+
+    // Stated at boot whether or not spending is on, and never silently. An
+    // owner reading these logs to find out why their agent will not pay for
+    // something must find the answer here rather than having to resolve the
+    // name by hand.
+    console.log(
+      broker === undefined
+        ? `   wallet     off — CAPSULE_WALLET=off, this capsule cannot spend by any route`
+        : `   wallet     ${spendHeadline(config.spend)}`,
+    );
+    for (const problem of config.spend.problems) console.warn(`⚠️  wallet     ${problem}`);
     console.log(
       `   heartbeat  ${config.heartbeat.raw || "(never beaten)"} · beat every ${env.heartbeatSeconds}s, probe every ${env.tickSeconds}s`,
     );
@@ -279,6 +383,7 @@ async function main() {
       heartbeat: config.heartbeat.raw,
       heartbeatSeconds: env.heartbeatSeconds,
       gatewayFailing: false,
+      spend: spendStatus(lastGasPrice),
       checkedAt: new Date(),
     });
   } catch (error) {
@@ -295,9 +400,35 @@ async function main() {
     throw error;
   }
 
+  /**
+   * The teller window opens before the brain does.
+   *
+   * Order matters twice over: the gateway's environment carries the broker's URL
+   * and token, so the broker has to be listening before `apply` builds it — and
+   * a broker that cannot bind must be found now, at boot, rather than at the
+   * moment an agent first tries to spend.
+   *
+   * A failure here is fatal, and that is the same call `runtimeProblems` makes
+   * about a missing API key. Booting anyway would produce a capsule that
+   * heartbeats correctly, answers messages, and refuses every transfer with an
+   * error the model would report to its owner as a permission problem.
+   */
+  let wallet: WalletAccess | undefined;
+  if (broker !== undefined) {
+    try {
+      await broker.start();
+      wallet = { url: broker.url, token: broker.token };
+      console.log(`   wallet     broker on ${broker.url} · capsule-wallet is on the agent's PATH`);
+    } catch (error) {
+      console.error(`❌ wallet     ${error instanceof Error ? error.message : String(error)}`);
+      console.error("boot failed — wallet broker");
+      process.exit(1);
+    }
+  }
+
   // The brain comes up last, once everything it needs has been proved present.
   try {
-    await gateway.apply(config, credentials, persona);
+    await gateway.apply(config, credentials, persona, wallet);
     console.log(`   gateway    openclaw gateway · ${config.model}`);
     console.log(
       credentials.telegramToken === undefined
@@ -321,6 +452,11 @@ async function main() {
       // A machine being moved between hosts must not read as a revocation.
       console.log(`\n   ${signal}    shutting down`);
       void gateway.stop();
+      // Before the loop unwinds. A broker still accepting requests after the
+      // gateway has been told to stop would be signing on behalf of an agent
+      // that is on its way out, and the machine is usually being moved rather
+      // than recalled — so this is about not leaving a transaction in flight.
+      void broker?.stop();
       shutdown.abort();
     });
   }
@@ -348,6 +484,11 @@ async function main() {
   // a re-point to the same text is still a restart the owner asked for.
   let livePromptRef = config.promptRef;
 
+  // The policy the last log line described, as the two raw records. Compared as
+  // written rather than as parsed, so an owner correcting a typo that parsed to
+  // the same cap still sees that their transaction landed.
+  let liveSpend = `${config.spend.capRaw}|${config.spend.allowRaw}`;
+
   // The highest sequence this process has written. The per-tick config reload
   // is the only other source of it, and a node that has not caught up with our
   // own transaction yet will hand back the previous value — which would make
@@ -367,6 +508,10 @@ async function main() {
     if (beat || Date.now() - cash.at >= FUNDING_REFRESH_MS) {
       const fresh = await funding(client, account.address);
       cash = { text: fresh.ok ? fresh.text : undefined, low: fresh.low, at: Date.now() };
+      if (fresh.ok) {
+        lastBalance = fresh.balance;
+        lastGasPrice = fresh.gasPrice;
+      }
     }
     await gateway.updateStatus({
       authorized: true,
@@ -380,6 +525,7 @@ async function main() {
       heartbeat: written > config.heartbeat.sequence ? heartbeatValue(written) : config.heartbeat.raw,
       heartbeatSeconds: env.heartbeatSeconds,
       gatewayFailing: gateway.failing,
+      spend: spendStatus(lastGasPrice),
       checkedAt: new Date(),
     });
   };
@@ -433,6 +579,18 @@ async function main() {
       // when its owner mistypes a model name is indistinguishable, on the
       // dashboard, from one that was recalled, and this project's headline claim
       // is that those two are never confused.
+      // Announced, never applied: the broker reads `config.spend` through a
+      // closure, so the new policy is already in force by the time this line
+      // prints. What this exists for is the log — an owner who has just lowered
+      // a cap needs to see the agent notice, and "nothing was printed" is
+      // indistinguishable from "the record did not land".
+      const spendNow = `${config.spend.capRaw}|${config.spend.allowRaw}`;
+      if (spendNow !== liveSpend) {
+        console.log(`🔄 ${stamp()}  wallet ${spendHeadline(config.spend)} — from the records, in force now`);
+        for (const problem of config.spend.problems) console.warn(`⚠️  ${stamp()}  wallet ${problem}`);
+        liveSpend = spendNow;
+      }
+
       const modelChanged = config.model !== liveModel;
       const personaChanged = config.promptRef !== livePromptRef;
 
@@ -487,12 +645,18 @@ async function main() {
       const sequence = Math.max(config.heartbeat.sequence, written) + 1;
 
       if (Date.now() >= nextBeatAt) {
-        const result = await writeHeartbeat({
-          publicClient: client,
-          walletClient,
-          config,
-          sequence,
-        });
+        // Queued, so a transaction the agent asked for cannot land on the same
+        // nonce. `submit` re-throws whatever the job threw, so every error this
+        // path already classifies — a revocation, an empty wallet — arrives at
+        // `reckon` exactly as it did before there was a queue.
+        const result = await transactions.submit(() =>
+          writeHeartbeat({
+            publicClient: client,
+            walletClient,
+            config,
+            sequence,
+          }),
+        );
         written = sequence;
         beats += 1;
         nextBeatAt = Date.now() + beatMs;
@@ -526,6 +690,7 @@ async function main() {
         ticks,
         beats,
         gateway,
+        broker,
       });
 
       if (verdict === "unfunded") {
@@ -569,7 +734,9 @@ async function main() {
   }
 
   await gateway.stop();
-  console.log(`   stopped    ${plural(ticks, "tick")} · ${plural(beats, "beat")}`);
+  await broker?.stop();
+  const moved = broker === undefined || broker.sent === 0 ? "" : ` · ${plural(broker.sent, "transaction")} sent`;
+  console.log(`   stopped    ${plural(ticks, "tick")} · ${plural(beats, "beat")}${moved}`);
   process.exit(0);
 }
 

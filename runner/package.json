@@ -11,7 +11,9 @@
     "heartbeat": "tsx src/heartbeat.cli.ts",
     "dev:prompt-server": "tsx dev/prompt-server.ts",
     "typecheck": "tsc --noEmit",
-    "dev:gateway-smoke": "docker build -t capsule-runner . && docker run --rm --network none -v \"$PWD/dev:/capsule/dev:ro\" --entrypoint node capsule-runner --import tsx /capsule/dev/gateway-smoke.ts"
+    "dev:gateway-smoke": "docker build -t capsule-runner . && docker run --rm --network none -v \"$PWD/dev:/capsule/dev:ro\" --entrypoint node capsule-runner --import tsx /capsule/dev/gateway-smoke.ts",
+    "dev:wallet-smoke": "tsx dev/wallet-smoke.ts",
+    "dev:wallet": "anvil --chain-id 11155111 --silent & ANVIL=$!; sleep 2; tsx dev/wallet-smoke.ts; CODE=$?; kill $ANVIL; exit $CODE"
   },
   "keywords": [],
   "author": "",

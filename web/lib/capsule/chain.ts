@@ -227,7 +227,7 @@ export const resolverAbi = parseAbi([
 ]);
 
 /**
- * The one function this app ever sends: the recall.
+ * The recall.
  *
  * Separate from `resolverAbi` because that one is a read ABI — it is encoded
  * into `UniversalResolver.resolve()` calls, where a write function has no
@@ -258,6 +258,33 @@ export const resolverAdminAbi = parseAbi([
   // than per-name because the capsule names do not exist yet at that point.
   "function grantRootRoles(uint256 roleBitmap, address account) returns (bool)",
   "function revokeRootRoles(uint256 roleBitmap, address account) returns (bool)",
+]);
+
+/**
+ * Writing a text record as the name's owner.
+ *
+ * The second thing this app sends, and the first that is not a revocation. The
+ * launchpad uses it to set `agent-spend-cap` right after a mint, because
+ * `CapsuleMinter` does not write that key — no deployed minter knows it exists —
+ * and the owner is the only account that can.
+ *
+ * They can because `mint()` grants them `OWNER_NAME_ROLES` on their own name,
+ * which is `ROLE_SET_TEXT | ROLE_SET_TEXT_ADMIN` scoped to it. The same grant
+ * that makes the recall possible makes this possible, and it is the reason a
+ * spending policy needed no contract change.
+ *
+ * `node` is a namehash here, NOT the DNS wire format `authorizeTextRoles`
+ * takes. The two live side by side in this file and are not interchangeable:
+ * passing DNS bytes to `setText` writes a record on a name nobody owns.
+ *
+ * `EACUnauthorizedAccountRoles` is the revert an account without the role
+ * gets — and per the resolver's `onlyPartRoles` modifier it names the
+ * name-level resource whichever key was denied, so never read the key out of it.
+ */
+export const resolverTextAbi = parseAbi([
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "function setText(bytes32 node, string key, string value)",
+  "function text(bytes32 node, string key) view returns (string)",
 ]);
 
 /**

@@ -32,6 +32,7 @@ import {
   type RecordKeyName,
 } from "../lib/capsule/records";
 import { SCHEMA_DIALECT, SCHEMA_PATH, capsuleAgentSchema } from "../lib/capsule/schema";
+import { MAX_SPEND_CAP_ETH } from "../lib/capsule/spend";
 import {
   PROVIDERS,
   PROVIDER_IDS,
@@ -176,6 +177,35 @@ if (!existsSync(subgraphCopy)) {
     prefixMatch === null
       ? "not found in subgraph/src/records.ts"
       : `subgraph "${prefixMatch[1]}" vs "${expectedPrefix}"`,
+  );
+}
+
+// ---------------------------------------------------------------------------
+// 1c. The spending cap ceiling agrees with the runner's.
+//
+// `POLICY_KEYS` rides along in the byte-identical records.ts, so the key
+// strings are already guarded. This is the other value the two sides both hold
+// an opinion about: the launchpad refuses a cap above it, and the runner
+// refuses to honour one above it.
+//
+// Drift here is quiet and expensive in one direction only. If the web ceiling
+// is the higher of the two, the form accepts a cap, the owner pays gas to write
+// it on chain, and the agent reads it back and silently treats it as zero —
+// spending is off, the record says otherwise, and nothing anywhere reports a
+// problem.
+// ---------------------------------------------------------------------------
+const runnerPolicy = resolve(here, "../../runner/src/policy.ts");
+if (!existsSync(runnerPolicy)) {
+  checks.push({ name: "runner MAX_SANE_CAP", ok: true, detail: "", pending: true });
+} else {
+  const policyText = readFileSync(runnerPolicy, "utf8");
+  const match = /export const MAX_SANE_CAP = parseEther\("([^"]*)"\);/.exec(policyText);
+  expect(
+    "spend cap ceiling",
+    match !== null && match[1] === MAX_SPEND_CAP_ETH,
+    match === null
+      ? "MAX_SANE_CAP not found in runner/src/policy.ts — did it get renamed?"
+      : `runner "${match[1]}" vs web MAX_SPEND_CAP_ETH "${MAX_SPEND_CAP_ETH}"`,
   );
 }
 

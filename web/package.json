@@ -2,7 +2,7 @@
   "name": "capsule-client",
   "version": "0.1.2",
   "private": true,
-  "description": "Capsule launchpad + fleet dashboard — front end only, mock data",
+  "description": "Capsule launchpad + fleet dashboard \u2014 front end only, mock data",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -25,7 +25,8 @@
     "check:register": "node --env-file=.env.local --import tsx scripts/check-register.ts",
     "fork:register": "node --import tsx scripts/fork-register.ts",
     "fork:subregistry": "node --import tsx scripts/fork-subregistry.ts",
-    "fix:endpoint": "node --env-file=.env.local --import tsx scripts/fix-endpoint.ts"
+    "fix:endpoint": "node --env-file=.env.local --import tsx scripts/fix-endpoint.ts",
+    "check:spend": "tsx scripts/check-spend.ts"
   },
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",

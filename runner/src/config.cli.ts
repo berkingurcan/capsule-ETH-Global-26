@@ -10,6 +10,7 @@ import "dotenv/config";
 import { privateKeyToAccount } from "viem/accounts";
 import { createRunnerClient } from "./chain.js";
 import { ConfigError, loadCapsuleConfig } from "./config.js";
+import { spendHeadline } from "./policy.js";
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 
 const short = (address: string) => `${address.slice(0, 10)}…${address.slice(-6)}`;
@@ -57,6 +58,10 @@ async function main() {
   console.log(
     `✅ heartbeat  ${config.heartbeat.raw === "" ? "(never beaten)" : config.heartbeat.raw} → next beat-${next}`,
   );
+  // Reported whether or not it is on, and with the mark it deserves rather than
+  // a tick: a capsule that cannot spend is correctly configured, not broken.
+  console.log(`${config.spend.cap > 0n ? "✅" : "  "} wallet     ${spendHeadline(config.spend)}`);
+  for (const problem of config.spend.problems) console.warn(`⚠️  wallet     ${problem}`);
   console.log("config loaded");
 }
 
