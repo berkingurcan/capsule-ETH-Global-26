@@ -126,19 +126,41 @@ Then, in `web/.env.local`:
 ```bash
 # The dashboard reads the index directly over the Studio query URL.
 SUBGRAPH_URL=https://api.studio.thegraph.com/query/<account>/<slug>/<version>
-
-# The analyst reaches the same subgraph through The Graph's hosted Subgraph MCP
-# server, which addresses subgraphs by id and authenticates with a gateway key.
-SUBGRAPH_ID=<the base58 subgraph id, not the URL>
-GRAPH_API_KEY=<gateway API key from Subgraph Studio>
-ANTHROPIC_API_KEY=<...>
 ```
 
-`SUBGRAPH_URL` is optional. Unset — or set and failing, or still syncing — and
-`/fleet` falls back to the chain reader; the dashboard prints which one served
-it and how many blocks behind the head the index was. That fallback is the one
-silent-degradation in the app that is deliberate, and it is only acceptable
-because it is visible on the page.
+That is enough to run everything. The analyst will start in **direct mode**,
+querying that URL through two local function tools.
+
+### Publishing, and why the analyst needs it for MCP
+
+The Graph's hosted Subgraph MCP server queries `gateway.thegraph.com`, and the
+gateway serves only subgraphs **published to the decentralized network**. A
+subgraph that is deployed to Studio and not published is unreachable through it
+by every identifier — measured against this deployment:
+
+```
+gateway /deployments/id/Qm…   ->  "subgraph not found"
+gateway /subgraphs/id/Qm…     ->  "invalid subgraph ID"
+Studio query URL              ->  200, real rows
+```
+
+Note that `graph deploy` hands you an **IPFS hash** (`Qm…`), which identifies
+the *deployment*. The **subgraph id** that `execute_query_by_subgraph_id` takes
+is a base58 string minted when you publish, and the two are not interchangeable.
+
+To switch the analyst onto Subgraph MCP: hit **Publish** in Studio (Arbitrum
+One — costs gas, and signalling GRT is what gets indexers to serve it), then
+
+```bash
+SUBGRAPH_ID=<the base58 NETWORK subgraph id>
+GRAPH_API_KEY=<gateway API key from Studio's API Keys tab>
+```
+
+`loadAnalystEnv()` sees a network id plus a gateway key and switches to MCP on
+its own. Nothing else changes — same prompt, same page, same schema-then-query
+discipline. It rejects a `Qm…` id with a message saying exactly this, rather
+than letting the model discover it as "subgraph not found" several seconds into
+a stream.
 
 ## Local indexing
 

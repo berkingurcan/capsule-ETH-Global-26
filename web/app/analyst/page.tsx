@@ -2,6 +2,8 @@
 
 import { useEffect, useRef, useState } from "react";
 import Capsule from "@/components/Capsule";
+import { useWallet } from "@/lib/wallet/WalletProvider";
+import { DEFAULT_PARENT_NAME } from "@/lib/capsule/public-env";
 
 /* The fleet analyst.
 
@@ -16,7 +18,12 @@ import Capsule from "@/components/Capsule";
    under an answer, the answer came from nowhere and you can see that.
 
    The transcript starts empty. A page that opens with a worked example is a
-   page that has decided what you were going to ask. */
+   page that has decided what you were going to ask.
+
+   Whose fleet is derived from the connected wallet, exactly as /fleet derives
+   it — one minter serves every connected name, so "my agents" is meaningless
+   until you say whose. Without that the analyst answers across every parent the
+   deployment has ever served, which is almost never the question. */
 
 const SUGGESTIONS = [
   "Which agents changed config today, and who authorised it?",
@@ -62,11 +69,60 @@ function toolLabel(name: string): string {
   return name.replace(/_/g, " ");
 }
 
+type OwnedParent = { name: string; open: boolean; minted: number; connectedByOwner: boolean };
+
 export default function AnalystPage() {
+  const { address } = useWallet();
   const [turns, setTurns] = useState<Turn[]>([]);
   const [busy, setBusy] = useState(false);
   const [draft, setDraft] = useState("");
+  const [parents, setParents] = useState<OwnedParent[] | null>(null);
+  // Seeded with the deployment's default rather than null, so the first paint
+  // already names a fleet. Starting at null renders "every fleet this
+  // deployment has minted" for the tick before the wallet effect runs, which is
+  // a different claim about what the answers will cover.
+  const [parent, setParent] = useState<string | null>(
+    DEFAULT_PARENT_NAME === "" ? null : DEFAULT_PARENT_NAME,
+  );
+  const [finding, setFinding] = useState(false);
   const end = useRef<HTMLDivElement>(null);
+
+  /* Whose fleet, from the wallet — the same lookup FleetRouter does, against
+     the same route, so the analyst and the dashboard can never disagree about
+     which names belong to the visitor.
+
+     A wallet with several names is a real choice and the app must not guess:
+     the first is selected so the page is usable immediately, and the others are
+     offered as buttons. A disconnected wallet falls back to the deployment's
+     default, which is what a stranger should see. */
+  useEffect(() => {
+    if (address === null) {
+      setParents(null);
+      setParent(DEFAULT_PARENT_NAME === "" ? null : DEFAULT_PARENT_NAME);
+      return;
+    }
+    let cancelled = false;
+    setFinding(true);
+    fetch(`/api/capsule/parents?owner=${address}`)
+      .then((response) => (response.ok ? response.json() : { parents: [] }))
+      .then((body: { parents?: OwnedParent[] }) => {
+        if (cancelled) return;
+        const found = body.parents ?? [];
+        setParents(found);
+        setParent(found[0]?.name ?? (DEFAULT_PARENT_NAME === "" ? null : DEFAULT_PARENT_NAME));
+      })
+      .catch(() => {
+        // A failed lookup costs the scoping, not the page: the analyst still
+        // answers, just across every fleet, and the header says so.
+        if (!cancelled) setParents([]);
+      })
+      .finally(() => {
+        if (!cancelled) setFinding(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [address]);
 
   useEffect(() => {
     end.current?.scrollIntoView({ behavior: "smooth", block: "end" });
@@ -114,7 +170,7 @@ export default function AnalystPage() {
       const response = await fetch("/api/analyst", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ question: asked, history }),
+        body: JSON.stringify({ question: asked, history, parent }),
       });
 
       // A failure before the first byte is still an HTTP status, and the two
@@ -223,6 +279,43 @@ export default function AnalystPage() {
             role changes and heartbeats, in one index. It answers in sentences and shows the GraphQL it ran, so you
             can check it.
           </p>
+          {/* Whose fleet, stated rather than assumed. The whole page is scoped
+              to one parent and an answer about the wrong six agents looks
+              exactly like an answer about the right six. */}
+          <p className="hint mono" style={{ marginTop: 10, fontSize: 12 }}>
+            {finding
+              ? "checking which names this wallet has…"
+              : parent === null
+                ? "reading every fleet this deployment has minted"
+                : `reading ${parent}${address === null ? " (the default — connect a wallet for yours)" : ""}`}
+          </p>
+
+          {/* Two or more names is a genuine choice and the app must not guess,
+              the same rule /fleet follows. Switching clears the transcript:
+              a follow-up carries prior turns, and answers about one fleet are
+              not context for a question about another. */}
+          {(parents ?? []).length > 1 && (
+            <div className="row wrapflex" style={{ gap: 8, marginTop: 10 }}>
+              {(parents ?? []).map((owned) => (
+                <button
+                  key={owned.name}
+                  className={owned.name === parent ? "btn btn-sm btn-primary" : "btn btn-sm"}
+                  disabled={busy}
+                  onClick={() => {
+                    if (owned.name === parent) return;
+                    setParent(owned.name);
+                    setTurns([]);
+                  }}
+                >
+                  {owned.name}
+                  <span className="hint" style={{ marginLeft: 8 }}>
+                    {owned.minted > 0 ? `${owned.minted} agent${owned.minted === 1 ? "" : "s"}` : "no agents yet"}
+                  </span>
+                </button>
+              ))}
+            </div>
+          )}
+
           <div className="notice paper" style={{ marginTop: 16 }}>
             <span className="tag ink">Why a subgraph</span>
             <p style={{ margin: 0 }}>
@@ -254,8 +347,11 @@ export default function AnalystPage() {
               {turns.length === 0 && (
                 <div className="panel flat shell" style={{ padding: "16px 18px", borderRadius: 16 }}>
                   <p style={{ margin: 0, fontSize: 15, lineHeight: 1.6 }}>
-                    I read the fleet subgraph — names, records, roles and heartbeats on ETH Sepolia. Ask me about the
-                    fleet in plain language, or pick one of the questions on the right.
+                    I read the fleet subgraph — names, records, roles and heartbeats on ETH Sepolia.{" "}
+                    {parent === null
+                      ? "No fleet is selected, so I will answer across every name this deployment has minted."
+                      : `Questions are scoped to ${parent}.`}{" "}
+                    Ask in plain language, or pick one of the questions on the right.
                   </p>
                 </div>
               )}
@@ -406,8 +502,11 @@ export default function AnalystPage() {
             <div className="notice paper">
               <span className="tag ink">Same index</span>
               <p style={{ margin: 0 }}>
-                <a href="/fleet">The fleet dashboard</a> reads the same subgraph. The analyst is not a second source of
-                truth about the fleet — it is a second way to ask the first one.
+                <a href={parent === null ? "/fleet" : `/fleet?parent=${encodeURIComponent(parent)}`}>
+                  The fleet dashboard
+                </a>{" "}
+                reads the same subgraph, scoped to the same name. The analyst is not a second source of truth about
+                the fleet — it is a second way to ask the first one.
               </p>
             </div>
           </div>

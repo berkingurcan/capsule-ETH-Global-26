@@ -22,7 +22,7 @@
 import { createServerClient } from "./chain";
 import { loadServerEnv, optionalEnv } from "./env";
 import { readFleet, type Capsule, type Fleet } from "./fleet";
-import { readFleetFromSubgraph, SubgraphError } from "./fleet-graph";
+import { readFleetFromSubgraph, readOwnerParentsFromSubgraph, SubgraphError } from "./fleet-graph";
 import { encodeParent, readOwnerParents, type OwnedParent } from "./parent";
 
 export type FleetResult = { ok: true; fleet: Fleet } | { ok: false; error: string };
@@ -85,14 +85,25 @@ export type OwnerParentsResult =
 /**
  * The names one wallet has minted under or connected, for routing a bare /fleet.
  *
- * Server-side for the same reason `loadFleet` is: `SEPOLIA_RPC_URL` is not a
- * public variable, and the answer should come from the same client the fleet
- * itself is read with rather than from a second, browser-shaped path that can
- * drift.
+ * Server-side for the same reason `loadFleet` is, and through the same two
+ * readers: whichever source answered the fleet must also answer whose fleet it
+ * is, or a wallet could be routed to a name the dashboard then renders as
+ * empty because the two disagreed about which parents exist.
  */
 export async function loadOwnerParents(owner: string): Promise<OwnerParentsResult> {
   try {
     const env = loadServerEnv();
+
+    const subgraphUrl = optionalEnv("SUBGRAPH_URL");
+    if (subgraphUrl !== undefined) {
+      try {
+        return { ok: true, parents: await readOwnerParentsFromSubgraph(subgraphUrl, owner as `0x${string}`) };
+      } catch (error) {
+        if (!(error instanceof SubgraphError)) throw error;
+        console.warn(`subgraph owner-parents read failed, falling back to the chain: ${error.message}`);
+      }
+    }
+
     const client = createServerClient(env.rpcUrl);
     const parents = await readOwnerParents(client, {
       minter: env.minterAddress,

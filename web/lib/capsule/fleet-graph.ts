@@ -40,8 +40,9 @@
  * not yet in the index must not read as silence. `fleet-server.ts` decides
  * which reader runs; both remain correct.
  */
-import type { Address, Hex } from "viem";
+import { namehash, type Address, type Hex } from "viem";
 import { RECORD_KEYS, type RecordKeyName } from "./records";
+import type { OwnedParent } from "./parent";
 import {
   buildEvents,
   deriveStatus,
@@ -230,14 +231,6 @@ type GraphCapsule = {
   roleChanges: GraphRoleChange[];
 };
 
-type GraphResponse = {
-  data?: {
-    _meta: { block: { number: number; timestamp: number | null }; hasIndexingErrors: boolean } | null;
-    parents: { id: string; name: string; node: string; resolver: string; capsules: GraphCapsule[] }[];
-  };
-  errors?: { message: string }[];
-};
-
 export type SubgraphFleetConfig = {
   url: string;
   minter: Address;
@@ -255,26 +248,28 @@ export type SubgraphFleetConfig = {
   timeoutMs?: number;
 };
 
-export async function readFleetFromSubgraph(config: SubgraphFleetConfig): Promise<Fleet> {
-  const { url, minter, parentName } = config;
-
+/**
+ * One GraphQL request, with the failures that matter turned into throws.
+ *
+ * Extracted because two callers need it and because the subtle part is worth
+ * writing once: **GraphQL reports failures inside a 200**. Treating a response
+ * as successful because the status said so is how a dashboard renders an empty
+ * fleet and calls it a fleet with nothing in it.
+ */
+async function query<T>(
+  url: string,
+  document: string,
+  variables: Record<string, unknown>,
+  timeoutMs: number,
+): Promise<T> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), config.timeoutMs ?? 10_000);
-  let payload: GraphResponse;
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  let payload: { data?: T; errors?: { message: string }[] };
   try {
     const response = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        query: FLEET_QUERY,
-        variables: {
-          parent: parentName,
-          capsules: CAPSULES_PER_PARENT,
-          writes: WRITES_PER_CAPSULE,
-          beats: BEATS_PER_CAPSULE,
-          roles: ROLE_CHANGES_PER_CAPSULE,
-        },
-      }),
+      body: JSON.stringify({ query: document, variables }),
       signal: controller.signal,
       // The index moves; a cached fleet is a stale heartbeat.
       cache: "no-store",
@@ -282,7 +277,7 @@ export async function readFleetFromSubgraph(config: SubgraphFleetConfig): Promis
     if (!response.ok) {
       throw new SubgraphError(`the subgraph answered ${response.status} ${response.statusText}`);
     }
-    payload = (await response.json()) as GraphResponse;
+    payload = (await response.json()) as typeof payload;
   } catch (error) {
     if (error instanceof SubgraphError) throw error;
     if (error instanceof Error && error.name === "AbortError") {
@@ -293,14 +288,33 @@ export async function readFleetFromSubgraph(config: SubgraphFleetConfig): Promis
     clearTimeout(timer);
   }
 
-  // GraphQL reports failures in a 200. Treating that as success is how a
-  // dashboard renders an empty fleet and calls it a fleet with nothing in it.
   if (payload.errors !== undefined && payload.errors.length > 0) {
     throw new SubgraphError(payload.errors.map((e) => e.message).join("; "));
   }
   if (payload.data === undefined) throw new SubgraphError("the subgraph returned no data");
+  return payload.data;
+}
 
-  const meta = payload.data._meta;
+export async function readFleetFromSubgraph(config: SubgraphFleetConfig): Promise<Fleet> {
+  const { url, minter, parentName } = config;
+
+  const data = await query<{
+    _meta: { block: { number: number; timestamp: number | null }; hasIndexingErrors: boolean } | null;
+    parents: { id: string; name: string; node: string; resolver: string; capsules: GraphCapsule[] }[];
+  }>(
+    url,
+    FLEET_QUERY,
+    {
+      parent: parentName,
+      capsules: CAPSULES_PER_PARENT,
+      writes: WRITES_PER_CAPSULE,
+      beats: BEATS_PER_CAPSULE,
+      roles: ROLE_CHANGES_PER_CAPSULE,
+    },
+    config.timeoutMs ?? 10_000,
+  );
+
+  const meta = data._meta;
   if (meta === null) throw new SubgraphError("the subgraph has not indexed any blocks yet");
   if (meta.hasIndexingErrors) {
     // A subgraph that failed mid-chain keeps serving whatever it had reached,
@@ -314,7 +328,7 @@ export async function readFleetFromSubgraph(config: SubgraphFleetConfig): Promis
   const indexedBlock = BigInt(meta.block.number);
   const readAt = Math.floor(Date.now() / 1000);
 
-  const parent = payload.data.parents[0];
+  const parent = data.parents[0];
   if (parent === undefined) {
     // A name nobody has connected. Not an error — it is what `/fleet?parent=`
     // for a stranger's name correctly looks like.
@@ -465,4 +479,111 @@ export async function readCapsuleFromSubgraph(
 ): Promise<Capsule | null> {
   const fleet = await readFleetFromSubgraph(config);
   return fleet.capsules.find((capsule) => capsule.label === label) ?? null;
+}
+
+
+////////////////////////////////////////////////////////////////////////////
+// Whose fleet is this?
+////////////////////////////////////////////////////////////////////////////
+
+/**
+ * The names one wallet has capsules under, or connected itself.
+ *
+ * This is what routes a bare `/fleet` to the fleet the visitor actually has,
+ * and it is the same question the analyst has to answer before it can scope a
+ * question to "my agents". Both go through here so they cannot disagree about
+ * whose fleet is whose.
+ *
+ * Two signals, because there are two ways to have a fleet and neither implies
+ * the other. A wallet that called `connectParent` owns the name whether or not
+ * it has minted anything yet; a wallet that minted under somebody else's open
+ * parent has agents under a name it does not own. `readOwnerParents` in
+ * `parent.ts` gets the same pair off `ParentConnected` and `CapsuleMinted`
+ * logs — this asks the index instead, which turns a full log scan plus a
+ * `parentOf` multicall into one request.
+ */
+const OWNER_PARENTS_QUERY = `
+query OwnerParents($owner: Bytes!) {
+  connected: parents(where: { connectedBy: $owner, connected: true }, first: 50) {
+    name
+    node
+    id
+    open
+    capsuleCount
+  }
+  minted: capsules(where: { owner: $owner }, first: 500) {
+    label
+    parent { name node id open connected }
+  }
+}`;
+
+type GraphOwnerParent = {
+  name: string;
+  node: string;
+  id: string;
+  open: boolean;
+  capsuleCount: number;
+};
+
+type GraphOwnedCapsule = {
+  label: string;
+  parent: { name: string; node: string; id: string; open: boolean; connected: boolean };
+};
+
+export async function readOwnerParentsFromSubgraph(
+  url: string,
+  owner: Address,
+  timeoutMs = 10_000,
+): Promise<OwnedParent[]> {
+  const payload = await query<{
+    connected: GraphOwnerParent[];
+    minted: GraphOwnedCapsule[];
+  }>(url, OWNER_PARENTS_QUERY, { owner: owner.toLowerCase() }, timeoutMs);
+
+  const found = new Map<string, OwnedParent>();
+
+  for (const parent of payload.connected) {
+    found.set(parent.name, {
+      name: parent.name,
+      node: parent.node as Hex,
+      registry: parent.id as Address,
+      open: parent.open,
+      minted: 0,
+      connectedByOwner: true,
+    });
+  }
+
+  // Counted by distinct label, so a name re-minted after expiry is one agent
+  // and not two — the same rule the chain reader applies.
+  const labels = new Map<string, Set<string>>();
+  for (const capsule of payload.minted) {
+    const parent = capsule.parent;
+    if (!parent.connected) continue;
+    const seen = labels.get(parent.name) ?? new Set<string>();
+    seen.add(capsule.label);
+    labels.set(parent.name, seen);
+    if (!found.has(parent.name)) {
+      found.set(parent.name, {
+        name: parent.name,
+        node: parent.node as Hex,
+        registry: parent.id as Address,
+        open: parent.open,
+        minted: 0,
+        connectedByOwner: false,
+      });
+    }
+  }
+  for (const [name, seen] of labels) {
+    const parent = found.get(name);
+    if (parent !== undefined) parent.minted = seen.size;
+  }
+
+  // The index stores the name the minter published in DNS wire format; this
+  // confirms it still hashes to the node it is filed under. A name that does
+  // not is dropped rather than shown, for the same reason `parent.ts` verifies
+  // its own decode: a wrong name here is a dashboard confidently showing the
+  // wrong fleet.
+  return [...found.values()].filter(
+    (parent) => parent.name !== "" && namehash(parent.name).toLowerCase() === parent.node.toLowerCase(),
+  );
 }

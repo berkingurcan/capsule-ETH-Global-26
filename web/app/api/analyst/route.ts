@@ -31,6 +31,19 @@
  * subgraph it reads is ours, and the key it authenticates with can do nothing
  * but query.
  *
+ * ## Two modes, and the lesser one is not a fallback for failure
+ *
+ * `loadAnalystEnv()` infers which door onto the subgraph is open. Published to
+ * the decentralized network, and the model gets the MCP toolset above.
+ * Deployed to Studio only — which is where every subgraph starts — and the
+ * gateway cannot see it by any identifier, so the model gets two local
+ * function tools against the Studio endpoint instead
+ * (`lib/capsule/subgraph-tools.ts`).
+ *
+ * The model's job is identical either way: discover the schema, write GraphQL,
+ * run it, answer from rows. Only the transport differs, and the switch is one
+ * environment variable rather than a code change.
+ *
  * ## What this route will not do
  *
  * It will not answer without querying. The system prompt says so, and the
@@ -42,7 +55,13 @@
  */
 import OpenAI from "openai";
 import { NextResponse } from "next/server";
-import { InvalidEnvError, MissingEnvError, loadAnalystEnv } from "@/lib/capsule/env";
+import { InvalidEnvError, MissingEnvError, loadAnalystEnv, type AnalystEnv } from "@/lib/capsule/env";
+import {
+  SUBGRAPH_FUNCTION_TOOLS,
+  SUBGRAPH_TOOL_NAMES,
+  runSubgraphTool,
+} from "@/lib/capsule/subgraph-tools";
+import { parentNameProblems } from "@/lib/capsule/parent";
 
 /** Node, not edge: the OpenAI SDK and a long-lived stream want it. */
 export const runtime = "nodejs";
@@ -89,6 +108,16 @@ const SERVER_LABEL = "subgraph";
  */
 const MAX_OUTPUT_TOKENS = 16000;
 
+/**
+ * How many times the model may call a tool before it has to answer.
+ *
+ * Only reached in `direct` mode, where this route runs the loop; the MCP
+ * server runs its own and returns once. Four is a schema read, two queries and
+ * a retry — past that the model is guessing at a schema it has already been
+ * shown, and a runaway loop on a metered API is a bill rather than an answer.
+ */
+const MAX_TOOL_TURNS = 4;
+
 /** Anything longer is not a question about a fleet of four agents. */
 const MAX_QUESTION = 500;
 /** How much conversation to carry. Enough for a follow-up, not a transcript. */
@@ -99,7 +128,73 @@ type Turn = { role: "user" | "assistant"; content: string };
 type Body = {
   question?: unknown;
   history?: unknown;
+  /**
+   * Whose fleet the question is about, e.g. `testpriv.eth`.
+   *
+   * Supplied by the browser, which derives it from the connected wallet the
+   * same way `/fleet` does — one minter serves every connected name, so "the
+   * fleet" is not a thing that exists and a question about "my agents" is
+   * meaningless without saying whose.
+   *
+   * Not a security boundary, and it must not be mistaken for one: everything
+   * in the index is public and the model could read any parent if it chose to.
+   * This is scoping, so that "which agents changed config today" answers about
+   * the six the visitor owns rather than about every capsule the deployment has
+   * ever minted.
+   */
+  parent?: unknown;
 };
+
+/**
+ * Which tools to reach for, in the mode this deployment is actually in.
+ *
+ * Named tools rather than "use your tools": the MCP server exposes three
+ * families that differ only in which identifier they take — by subgraph id, by
+ * deployment id, by IPFS hash — and a model that picks the wrong one gets
+ * "subgraph not found" and no hint about why. Being explicit costs a sentence.
+ */
+function toolGuidance(env: AnalystEnv): string {
+  if (env.mode === "mcp") {
+    return (
+      `The subgraph is published to The Graph's decentralized network with subgraph ID \`${env.subgraphId}\`. ` +
+      "Call `get_schema_by_subgraph_id` with that ID before your first query, then " +
+      "`execute_query_by_subgraph_id` to run GraphQL against it. That ID is a *subgraph* ID — do not pass it to " +
+      "the deployment-id or IPFS-hash variants of those tools."
+    );
+  }
+  return (
+    "Call `get_subgraph_schema` before your first query, then `run_subgraph_query` to run GraphQL against it. " +
+    "Both address the fleet subgraph directly; neither takes an identifier."
+  );
+}
+
+/**
+ * Which fleet the question is about.
+ *
+ * Without this the model answers across every parent the minter has ever
+ * served, which is the wrong answer to almost every question a visitor asks:
+ * they mean *their* agents. With it, "which agents changed config today" is
+ * scoped the same way the dashboard they just came from was.
+ *
+ * Spelled as a filter the model can paste rather than as a fact it has to
+ * translate — `parent_` is graph-node's nested-entity filter and guessing it
+ * costs a wasted query.
+ */
+function scopeGuidance(parent: string | null): string {
+  if (parent === null) {
+    return (
+      "No particular fleet was named, so you are looking at every parent this deployment has served. " +
+      "Say which parent each capsule belongs to, since more than one may appear."
+    );
+  }
+  return (
+    `The visitor is asking about the fleet under **${parent}**, and unless they clearly ask about ` +
+    `something else you should scope every query to it: \`parents(where: { name: "${parent}" })\`, or ` +
+    `\`capsules(where: { parent_: { name: "${parent}" } })\`, or on RecordWrite / Heartbeat / RoleChange ` +
+    `\`where: { capsule_: { parent_: { name: "${parent}" } } }\`. If a query comes back empty, say so for ` +
+    `that fleet rather than widening to every parent without saying you did.`
+  );
+}
 
 /**
  * What the model is told before it sees the question.
@@ -110,7 +205,9 @@ type Body = {
  * the whole point of this system is that a stopped capsule is usually someone
  * pulling a role on purpose.
  */
-function instructions(subgraphId: string): string {
+function instructions(env: AnalystEnv, parent: string | null): string {
+  const tools = toolGuidance(env);
+  const scope = scopeGuidance(parent);
   return `You are the fleet analyst for Capsule, reading a subgraph of AI agents that live as ENSv2 names on Ethereum Sepolia.
 
 ## What you are looking at
@@ -131,7 +228,7 @@ A heartbeat is an on-chain write of \`beat-<n>\`, a monotonic counter, costing a
 
 ## The subgraph
 
-Query subgraph ID \`${subgraphId}\`. Always call \`get_schema_by_subgraph_id\` before your first query so you are writing GraphQL against the real schema rather than against this summary. The entities are:
+${tools} The entities are:
 
 - \`Parent\` — a connected ENS name. Fields include \`name\`, \`resolver\`, \`open\`, \`connected\`, \`capsuleCount\`, and \`capsules\`.
 - \`Capsule\` — one agent. Current record values (\`model\`, \`prompt\`, \`context\`, \`runtime\`, \`endpointCapsule\`, \`endpointWeb\`, \`heartbeat\`), identity (\`name\`, \`label\`, \`owner\`, \`agent\`, \`addr\`, \`tokenId\`), permission (\`authorized\`, \`recallCount\`, \`recalledAt\`), heartbeat state (\`beatCount\`, \`firstBeatAt\`, \`lastBeatAt\`, \`lastInterval\`), and churn (\`configWriteCount\`, \`ownerWriteCount\`, \`lastConfigChangeAt\`).
@@ -140,6 +237,8 @@ Query subgraph ID \`${subgraphId}\`. Always call \`get_schema_by_subgraph_id\` b
 - \`RoleChange\` — one permission change. \`granted\`, \`revoked\`, \`account\`, \`changedBy\`, \`resourceKind\` (\`agent-heartbeat\` or \`name\`), \`beatsAtChange\`, and \`secondsSinceLastBeat\` — the gap between the capsule's last heartbeat and this change.
 - \`Fleet\` — totals across the whole deployment.
 
+${scope}
+
 \`secondsSinceLastBeat\` on a RoleChange is the field to reach for when someone asks whether an agent stopped before or after it was recalled. It is a join across two contracts' event streams that no single contract emits together, and it is the reason this subgraph exists.
 
 All timestamps are Unix seconds. Compare them to each other rather than to your own idea of the current time.
@@ -147,6 +246,7 @@ All timestamps are Unix seconds. Compare them to each other rather than to your 
 ## How to answer
 
 - Query first. Never answer a question about the fleet from these instructions alone — they describe the shape of the data, not its contents.
+- Read the schema before your first query, every time. This summary can drift from the deployed subgraph; the schema tool cannot.
 - Lead with one sentence that answers the question. Then the specifics.
 - Name names. \`analyst.capsulefleet.eth\`, not "one of the agents".
 - Give numbers as they came back. Never round a count, never estimate a timestamp, never fill a gap with a plausible value.
@@ -187,41 +287,73 @@ export async function POST(request: Request): Promise<Response> {
     );
   }
 
+  // A parent that fails validation is refused rather than dropped: silently
+  // widening to every fleet would answer a question the visitor did not ask,
+  // under a heading naming the one they did.
+  let parent: string | null = null;
+  if (typeof body.parent === "string" && body.parent.trim() !== "") {
+    const candidate = body.parent.trim().toLowerCase();
+    const problems = parentNameProblems(candidate);
+    if (problems.length > 0) {
+      return NextResponse.json({ error: `parent ${problems[0]}` }, { status: 400 });
+    }
+    parent = candidate;
+  }
+
   const history = parseHistory(body.history);
   const client = new OpenAI({ apiKey: env.openaiApiKey });
 
-  let stream;
-  try {
-    stream = await client.responses.create({
+  const tools: OpenAI.Responses.Tool[] =
+    env.mode === "mcp"
+      ? [
+          {
+            type: "mcp",
+            server_label: SERVER_LABEL,
+            server_description: "The Graph's Subgraph MCP server — schemas and GraphQL over indexed chain data.",
+            server_url: SUBGRAPH_MCP_URL,
+            // The gateway key, as the exact header The Graph documents:
+            // `Authorization: Bearer <key>`. Sent through `headers` rather than
+            // through the tool's `authorization` field because that field is
+            // specified as an OAuth access token — this is an API key that
+            // happens to travel as a bearer token, and spelling the header out
+            // leaves nothing for the two to disagree about.
+            headers: { Authorization: `Bearer ${env.graphApiKey}` },
+            // See the note at the top of this file. Without it the stream stops
+            // on the first tool call and waits for a turn this route never takes.
+            require_approval: "never",
+          },
+        ]
+      : SUBGRAPH_FUNCTION_TOOLS;
+
+  const prompt = instructions(env, parent);
+
+  /**
+   * The first request, made before the response starts streaming.
+   *
+   * Kept outside the ReadableStream so that a failure here is still an HTTP
+   * status rather than an error event — this is where a bad key, an unknown
+   * model or an unsupported parameter lands, and those deserve a status code.
+   */
+  type ResponseStream = AsyncIterable<OpenAI.Responses.ResponseStreamEvent> & {
+    controller: AbortController;
+  };
+
+  const open = (input: OpenAI.Responses.ResponseInput, previousResponseId?: string): Promise<ResponseStream> =>
+    client.responses.create({
       model: MODEL,
-      instructions: instructions(env.subgraphId),
-      input: [...history, { role: "user" as const, content: question }],
+      instructions: prompt,
+      input,
+      ...(previousResponseId === undefined ? {} : { previous_response_id: previousResponseId }),
       max_output_tokens: MAX_OUTPUT_TOKENS,
       ...(REASONING_SUMMARY ? { reasoning: { summary: "auto" as const } } : {}),
-      tools: [
-        {
-          type: "mcp",
-          server_label: SERVER_LABEL,
-          server_description: "The Graph's Subgraph MCP server — schemas and GraphQL over indexed chain data.",
-          server_url: SUBGRAPH_MCP_URL,
-          // The gateway key, as the exact header The Graph documents:
-          // `Authorization: Bearer <key>`. Sent through `headers` rather than
-          // through the tool's `authorization` field because that field is
-          // specified as an OAuth access token — this is an API key that
-          // happens to travel as a bearer token, and spelling the header out
-          // leaves nothing for the two to disagree about.
-          headers: { Authorization: `Bearer ${env.graphApiKey}` },
-          // See the note at the top of this file. Without it the stream stops
-          // on the first tool call and waits for a turn this route never takes.
-          require_approval: "never",
-        },
-      ],
+      tools,
       stream: true,
-    });
+    }) as unknown as Promise<ResponseStream>;
+
+  let stream: ResponseStream;
+  try {
+    stream = await open([...history, { role: "user" as const, content: question }]);
   } catch (error) {
-    // A failure here is before the first byte, so it can still be a status —
-    // which is worth keeping, because this is where a bad key, an unknown
-    // model or an unsupported parameter lands.
     const status = error instanceof OpenAI.APIError ? (error.status ?? 502) : 502;
     const message = error instanceof Error ? error.message : "the analyst could not start";
     return NextResponse.json({ error: message }, { status });
@@ -243,74 +375,123 @@ export async function POST(request: Request): Promise<Response> {
       };
 
       try {
-        for await (const event of stream) {
-          switch (event.type) {
-            case "response.output_text.delta":
-              send({ type: "text", text: event.delta });
-              break;
+        // One iteration in `mcp` mode — the MCP server runs its own tool loop
+        // and the response comes back finished. In `direct` mode this is the
+        // loop: stream a turn, execute whatever functions it asked for, hand
+        // the results back, stream the next one.
+        for (let turn = 0; turn < MAX_TOOL_TURNS; turn += 1) {
+          const pending: { callId: string; name: string; arguments: string }[] = [];
+          let responseId: string | undefined;
 
-            case "response.reasoning_summary_text.delta":
-              send({ type: "thinking", text: event.delta });
-              break;
+          for await (const event of stream) {
+            switch (event.type) {
+              case "response.output_text.delta":
+                send({ type: "text", text: event.delta });
+                break;
 
-            // A tool call appears twice on purpose. `added` carries the name
-            // and nothing else, which is what makes the page able to say
-            // "running a query" while the arguments are still streaming;
-            // `done` carries the finished arguments, which is the GraphQL the
-            // answer has to be checkable against. The page upserts on
-            // `item.id`, so the second overwrites the first.
-            case "response.output_item.added": {
-              const item = event.item;
-              if (item.type === "mcp_call") {
-                send({ type: "tool", id: item.id, name: item.name });
+              case "response.reasoning_summary_text.delta":
+                send({ type: "thinking", text: event.delta });
+                break;
+
+              // A tool call is reported twice on purpose. `added` carries the
+              // name and nothing else, which is what lets the page say
+              // "running a query" while the arguments are still streaming;
+              // `done` carries the finished arguments, which is the GraphQL
+              // the answer has to be checkable against. The page upserts on
+              // the id, so the second overwrites the first.
+              case "response.output_item.added": {
+                const item = event.item;
+                if (item.type === "mcp_call") send({ type: "tool", id: item.id, name: item.name });
+                else if (item.type === "function_call") send({ type: "tool", id: item.call_id, name: item.name });
+                break;
               }
-              break;
-            }
 
-            case "response.output_item.done": {
-              const item = event.item;
-              if (item.type === "mcp_call") {
+              case "response.output_item.done": {
+                const item = event.item;
+                if (item.type === "mcp_call") {
+                  send({
+                    type: "tool",
+                    id: item.id,
+                    name: item.name,
+                    input: safeParse(item.arguments),
+                    failed: item.error !== null && item.error !== undefined,
+                  });
+                } else if (item.type === "function_call") {
+                  send({
+                    type: "tool",
+                    id: item.call_id,
+                    name: item.name,
+                    input: safeParse(item.arguments),
+                  });
+                  pending.push({ callId: item.call_id, name: item.name, arguments: item.arguments });
+                }
+                break;
+              }
+
+              case "response.mcp_call.failed":
+                // The tool itself failed — a bad gateway key, a subgraph id
+                // that does not resolve, a query the index rejected. The model
+                // may still recover by trying something else, so this is
+                // reported and not treated as the end of the answer.
+                send({ type: "tool_failed" });
+                break;
+
+              case "response.completed":
+                responseId = event.response.id;
+                break;
+
+              case "response.failed": {
+                const detail = event.response.error;
+                send({ type: "error", message: detail?.message ?? "the model run failed" });
+                break;
+              }
+
+              case "response.incomplete": {
+                const reason = event.response.incomplete_details?.reason;
                 send({
-                  type: "tool",
-                  id: item.id,
-                  name: item.name,
-                  input: safeParse(item.arguments),
-                  failed: item.error !== null && item.error !== undefined,
+                  type: "error",
+                  message:
+                    reason === "max_output_tokens"
+                      ? "The answer ran past its length limit — try a narrower question."
+                      : `The run stopped early (${reason ?? "unknown reason"}).`,
                 });
+                break;
               }
-              break;
+
+              case "error":
+                send({ type: "error", message: event.message ?? "the stream errored" });
+                break;
             }
-
-            case "response.mcp_call.failed":
-              // The tool itself failed — a bad gateway key, a subgraph id that
-              // does not resolve, a query the index rejected. The model may
-              // still recover by trying something else, so this is reported
-              // and not treated as the end of the answer.
-              send({ type: "tool_failed" });
-              break;
-
-            case "response.failed": {
-              const detail = event.response.error;
-              send({ type: "error", message: detail?.message ?? "the model run failed" });
-              break;
-            }
-
-            case "response.incomplete": {
-              const reason = event.response.incomplete_details?.reason;
-              send({
-                type: "error",
-                message:
-                  reason === "max_output_tokens"
-                    ? "The answer ran past its length limit — try a narrower question."
-                    : `The run stopped early (${reason ?? "unknown reason"}).`,
-              });
-              break;
-            }
-
-            case "error":
-              send({ type: "error", message: event.message ?? "the stream errored" });
-              break;
           }
+
+          if (pending.length === 0) break;
+
+          // Every requested tool, in parallel — the model asks for a schema
+          // read and a query together often enough to be worth it, and
+          // `runSubgraphTool` never throws, so one failing does not lose the
+          // others.
+          const results = await Promise.all(
+            pending.map(async (call) => ({
+              type: "function_call_output" as const,
+              call_id: call.callId,
+              output: SUBGRAPH_TOOL_NAMES.has(call.name)
+                ? await runSubgraphTool(call.name, call.arguments, env.subgraphUrl!)
+                : `error: no tool named ${call.name}`,
+            })),
+          );
+
+          if (turn === MAX_TOOL_TURNS - 1) {
+            // Out of budget with results in hand and nowhere to spend them.
+            // Better to say so than to let the page show a transcript of
+            // queries and no sentence at the end of it.
+            send({
+              type: "error",
+              message: `The analyst used its ${MAX_TOOL_TURNS} tool calls without reaching an answer — try a narrower question.`,
+            });
+            break;
+          }
+
+          stream = await open(results, responseId);
         }
         send({ type: "done" });
       } catch (error) {
