@@ -14,7 +14,7 @@
 import { createServerClient } from "./chain";
 import { loadServerEnv } from "./env";
 import { readFleet, type Capsule, type Fleet } from "./fleet";
-import { encodeParent } from "./parent";
+import { encodeParent, readOwnerParents, type OwnedParent } from "./parent";
 
 export type FleetResult = { ok: true; fleet: Fleet } | { ok: false; error: string };
 
@@ -37,6 +37,33 @@ export async function loadFleet(parentName?: string): Promise<FleetResult> {
       fromBlock: env.minterBlock,
     });
     return { ok: true, fleet };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+export type OwnerParentsResult =
+  | { ok: true; parents: OwnedParent[] }
+  | { ok: false; error: string };
+
+/**
+ * The names one wallet has minted under or connected, for routing a bare /fleet.
+ *
+ * Server-side for the same reason `loadFleet` is: `SEPOLIA_RPC_URL` is not a
+ * public variable, and the answer should come from the same client the fleet
+ * itself is read with rather than from a second, browser-shaped path that can
+ * drift.
+ */
+export async function loadOwnerParents(owner: string): Promise<OwnerParentsResult> {
+  try {
+    const env = loadServerEnv();
+    const client = createServerClient(env.rpcUrl);
+    const parents = await readOwnerParents(client, {
+      minter: env.minterAddress,
+      fromBlock: env.minterBlock,
+      owner: owner as `0x${string}`,
+    });
+    return { ok: true, parents };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
