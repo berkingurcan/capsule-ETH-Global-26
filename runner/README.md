@@ -14,6 +14,60 @@ agent-prompt             cap_8f3d1a               → a pointer; the body stays 
 agent-heartbeat          the one key it may write → beat-1, beat-2, beat-3…
 ```
 
+## What the agent knows about itself
+
+The supervisor reads a whole identity off the chain and, until recently, told the
+model one part of it: the prompt body. Asked "what is your wallet address", a
+correctly provisioned capsule answered *"I do not have an EVM wallet or wallet
+address assigned to me"* — in good faith, because from inside the gateway that
+was the only observation available. A working capsule and an unprovisioned one
+gave the identical answer, which makes the answer worthless as evidence.
+
+So `~/.openclaw/workspace/AGENTS.md` is composed rather than copied
+(`src/persona.ts`). Three sections, in this order and never another:
+
+```
+# Capsule identity     name · addr · namehash · resolver · model · prompt ref
+                       and what the wallet is for: the supervisor holds the key,
+                       spends it on agent-heartbeat, and nothing else
+
+## Live status         authorized · balance · beat-<n> · ticks and beats this run
+                       rewritten every tick, no restart
+
+## Your instructions   the body of agent-prompt, verbatim
+```
+
+The order is the security property. `agent-prompt` is the only part of that file
+an attacker can reach — it arrives over the network from a pointer the owner
+controls — and it lands last, under a heading that names it, below facts the
+supervisor stated first. The resolver already refuses to let an agent rewrite its
+own `agent-prompt`; this is the same boundary written where the model can see it.
+
+The file is written through a temporary and renamed, because the tick loop
+rewrites it while the gateway is reading it, and the reader in a torn-write
+window is a language model being told who it is. The balance inside it is
+sampled on its own slower cadence — it only moves when the agent beats or its
+owner tops it up, and a beat forces a fresh read.
+
+**The same facts reach the child's environment** — `CAPSULE_NAME`,
+`CAPSULE_AGENT_ADDRESS`, `CAPSULE_NODE`, `CAPSULE_RESOLVER`, `CAPSULE_CHAIN_ID` —
+for tools and shell commands rather than prose. Every one is public: three are
+text records anybody can resolve and the fourth is the address they point at.
+
+`AGENT_KEY` is not among them and never will be. The agent cannot sign anything;
+the supervisor signs `agent-heartbeat` on its behalf and nothing else. Note the
+shape of that guard: `buildOpenClawEnv` builds the child's environment from
+nothing rather than filtering the supervisor's, so a new secret is excluded by
+default instead of having to be remembered. `dev/gateway-smoke.ts` asserts it,
+including a scan for anything shaped like a 32-byte key.
+
+`CAPSULE_RPC_URL` is the one exception that is opt-in. The supervisor's own
+`SEPOLIA_RPC_URL` usually carries a provider key in its path, which makes it a
+credential wearing a URL's clothes; handing it to a process that executes
+model-chosen tools would undo the paragraph above. Set `CAPSULE_AGENT_RPC_URL` to
+an endpoint you are willing to have the agent spend, or leave it unset and let
+the agent read its balance out of its own status block.
+
 **Two cadences.** Every `TICK_SECONDS` the runner asks whether it is still
 authorized — an `eth_call`, free, same modifier and same revert as the write.
 Every `HEARTBEAT_SECONDS` it writes `beat-<n>` for real.
@@ -43,6 +97,7 @@ given is one that fails in a way that looks like a revocation.
 | `CAPSULE_NAME` | e.g. `analyst.capsulefleet.eth` |
 | `TICK_SECONDS` | probe cadence. Default 30, minimum 5 |
 | `HEARTBEAT_SECONDS` | write cadence. Default 28800 (3/day); `60` for a demo. Must be >= `TICK_SECONDS` |
+| `CAPSULE_AGENT_RPC_URL` | an endpoint the *agent* may spend, reaching the gateway as `CAPSULE_RPC_URL`. Never `SEPOLIA_RPC_URL` — see below |
 | `CAPSULE_ENDPOINT_OVERRIDE` | dev only, announced in the logs when set |
 
 ## Commands

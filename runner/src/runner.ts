@@ -31,7 +31,7 @@ import { ConfigError, loadCapsuleConfig, type CapsuleConfig } from "./config.js"
 import { InvalidEnvError, MissingEnvError, loadEnv } from "./env.js";
 import { shortRevert } from "./errors.js";
 import { classifyHeartbeatFailure, confirmRevoked, type HeartbeatVerdict } from "./halt.js";
-import { LOW_BEATS, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
+import { LOW_BEATS, heartbeatValue, probeHeartbeat, readFunding, writeHeartbeat } from "./heartbeat.js";
 import { HEARTBEAT_KEY } from "./records.js";
 import { Gateway, runtimeProblems, telegramIsOpen } from "./openclaw.js";
 import { PromptCache, PromptError } from "./prompt.js";
@@ -43,6 +43,17 @@ const FAILURE_BUDGET = 5;
 
 /** A slow chain must never turn the cadence into a busy loop. */
 const MIN_SLEEP_MS = 5_000;
+
+/**
+ * How stale the balance in the agent's own status file is allowed to get.
+ *
+ * `readFunding` is two calls the tick loop does not otherwise make, and a tick
+ * is every 30 seconds by default. Re-reading it on each one would add ~5,700
+ * requests a day per capsule to answer a question whose answer only moves when
+ * this agent beats or its owner tops it up — and a beat forces a refresh anyway,
+ * so the interval only governs how quickly a top-up becomes visible.
+ */
+const FUNDING_REFRESH_MS = 300_000;
 
 const stamp = () => new Date().toISOString().slice(11, 19);
 const secs = (ms: number) => `${(ms / 1000).toFixed(1)}s`;
@@ -78,12 +89,17 @@ function sleep(ms: number, signal: AbortSignal): Promise<void> {
 async function funding(
   client: PublicClient,
   agent: Address,
-): Promise<{ text: string; low: boolean }> {
+): Promise<{ text: string; low: boolean; ok: boolean }> {
   try {
     const { balance, gasPrice, beats, low } = await readFunding(client, agent);
-    return { text: `${eth(balance)} · ~${count(beats)} beats at ${gwei(gasPrice)}`, low };
+    return { text: `${eth(balance)} · ~${count(beats)} beats at ${gwei(gasPrice)}`, low, ok: true };
   } catch (error) {
-    return { text: `balance unreadable — ${shortRevert(error)}`, low: false };
+    // `ok` exists because the two callers want different things from a failed
+    // read. A log line can print "balance unreadable" and move on; the agent's
+    // own status file must not, because "balance unreadable — HTTP 429" sitting
+    // in a table headed *Wallet balance* is how a model ends up telling its
+    // owner that is what it holds.
+    return { text: `balance unreadable — ${shortRevert(error)}`, low: false, ok: false };
   }
 }
 
@@ -198,6 +214,16 @@ async function main() {
   // first: a restart with the previous persona is a restart as the wrong agent.
   let persona: string;
 
+  /**
+   * The last balance read, and when. Seeded by the boot read below so the first
+   * tick does not immediately pay for a second one. See FUNDING_REFRESH_MS.
+   */
+  let cash: { text: string | undefined; low: boolean; at: number } = {
+    text: undefined,
+    low: false,
+    at: 0,
+  };
+
   try {
     const { body } = await prompts.load({
       endpoint,
@@ -230,6 +256,7 @@ async function main() {
     }
 
     const gas = await funding(client, account.address);
+    cash = { text: gas.ok ? gas.text : undefined, low: gas.low, at: Date.now() };
     console.log(
       gas.low
         ? `⚠️  gas        ${gas.text} — under ${LOW_BEATS}. Fund ${account.address} or the heartbeat stops`
@@ -238,6 +265,22 @@ async function main() {
     console.log(
       `   heartbeat  ${config.heartbeat.raw || "(never beaten)"} · beat every ${env.heartbeatSeconds}s, probe every ${env.tickSeconds}s`,
     );
+
+    // Stored, not written — `apply` below is what renders it, because the file
+    // has to exist complete before the gateway is spawned. Everything in it was
+    // already known and already logged; until now none of it was told to the
+    // one process whose job is to answer questions about this agent.
+    await gateway.updateStatus({
+      authorized: undefined,
+      ticks: 0,
+      beats: 0,
+      balance: gas.ok ? gas.text : undefined,
+      lowBalance: gas.low,
+      heartbeat: config.heartbeat.raw,
+      heartbeatSeconds: env.heartbeatSeconds,
+      gatewayFailing: false,
+      checkedAt: new Date(),
+    });
   } catch (error) {
     if (error instanceof PromptError) {
       console.error(`❌ prompt     ${error.kind} — ${error.message}`);
@@ -311,9 +354,42 @@ async function main() {
   // the next beat reuse a number and look, on chain, like nothing happened.
   let written = 0;
 
+  /**
+   * Tell the agent how it is doing.
+   *
+   * Deliberately not called on a transient failure. `authorized: false` means
+   * the chain said no, and an RPC that timed out did not say no — writing that
+   * into the agent's own file would have it announcing a revocation that never
+   * happened. A tick that fails simply leaves the previous status in place, and
+   * its `As of` stamp stops advancing, which is the truthful signal.
+   */
+  const snapshot = async (beat: boolean): Promise<void> => {
+    if (beat || Date.now() - cash.at >= FUNDING_REFRESH_MS) {
+      const fresh = await funding(client, account.address);
+      cash = { text: fresh.ok ? fresh.text : undefined, low: fresh.low, at: Date.now() };
+    }
+    await gateway.updateStatus({
+      authorized: true,
+      ticks,
+      beats,
+      balance: cash.text,
+      lowBalance: cash.low,
+      // The record reload happens at the top of the next tick, so straight after
+      // a beat the config still holds the previous value. This process knows
+      // better: it is the one that wrote it.
+      heartbeat: written > config.heartbeat.sequence ? heartbeatValue(written) : config.heartbeat.raw,
+      heartbeatSeconds: env.heartbeatSeconds,
+      gatewayFailing: gateway.failing,
+      checkedAt: new Date(),
+    });
+  };
+
   while (!stopping) {
     const startedAt = Date.now();
     ticks += 1;
+    // A beat moves the balance, so it is the one event worth spending a fresh
+    // read on rather than waiting out the refresh interval.
+    const beatsBefore = beats;
 
     try {
       // Config first. A failure here is tolerated: the last good copy is
@@ -440,6 +516,7 @@ async function main() {
       // unnoticed for the length of a demo.
       const brain = gateway.failing ? " · ⚠️ gateway down" : "";
       console.log(`✅ ${stamp()}  tick ${ticks} · authorized${brain} · ${secs(Date.now() - startedAt)}`);
+      await snapshot(beats !== beatsBefore);
     } catch (error) {
       const verdict = await reckon({
         error,
@@ -465,6 +542,9 @@ async function main() {
         // unfunded agent can, and killing it would turn a top-up into a redeploy.
         nextBeatAt = Date.now() + beatMs;
         consecutiveFailures = 0;
+        // Forced, because the balance is the whole story here and the agent
+        // should be able to say so when its owner asks why it went quiet.
+        await snapshot(true);
       } else {
         consecutiveFailures += 1;
         if (consecutiveFailures >= FAILURE_BUDGET) {
