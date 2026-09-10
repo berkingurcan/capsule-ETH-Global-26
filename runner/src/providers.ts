@@ -113,7 +113,7 @@ export function isBuiltInProvider(id: string): id is ProviderId {
  */
 export const SUGGESTED_MODELS: Record<ProviderId, string[]> = {
   anthropic: ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"],
-  openai: ["gpt-5.6-sol", "gpt-5.5"],
+  openai: ["gpt-5.6-sol", "gpt-5.6-luna", "gpt-5.5"],
   google: ["gemini-3.1-pro-preview", "gemini-3.5-flash"],
   deepseek: ["deepseek-v4-flash", "deepseek-v3.2"],
   groq: ["llama-3.3-70b-versatile"],
