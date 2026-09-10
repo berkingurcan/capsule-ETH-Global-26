@@ -5,9 +5,9 @@ import Capsule from "@/components/Capsule";
 
 /* The fleet analyst.
 
-   Claude, holding one toolset: The Graph's hosted Subgraph MCP server, pointed
-   at the fleet subgraph. It reads the schema, writes GraphQL, runs it, and
-   answers from the rows.
+   GPT, holding one tool: The Graph's hosted Subgraph MCP server, pointed at
+   the fleet subgraph. It reads the schema, writes GraphQL, runs it, and answers
+   from the rows.
 
    Every answer shows the query that produced it. That is not a debugging
    affordance — it is the only thing that makes a natural-language interface
@@ -25,7 +25,15 @@ const SUGGESTIONS = [
   "Has any agent ever had its heartbeat role pulled and then given back?",
 ];
 
-type Tool = { name: string; input: unknown };
+/**
+ * One MCP tool call.
+ *
+ * `input` is optional because a call is announced before its arguments have
+ * finished streaming: the route sends the name as soon as the model commits to
+ * the call, then sends it again with the finished GraphQL. Keyed by `id` so the
+ * second replaces the first rather than appending a duplicate row.
+ */
+type Tool = { id: string; name: string; input?: unknown; failed?: boolean };
 
 type Turn =
   | { who: "you"; text: string }
@@ -139,7 +147,15 @@ export default function AnalystPage() {
 
         for (const line of lines) {
           if (line.trim() === "") continue;
-          let event: { type?: string; text?: string; name?: string; input?: unknown; message?: string };
+          let event: {
+            type?: string;
+            text?: string;
+            id?: string;
+            name?: string;
+            input?: unknown;
+            failed?: boolean;
+            message?: string;
+          };
           try {
             event = JSON.parse(line);
           } catch {
@@ -156,10 +172,21 @@ export default function AnalystPage() {
             patch((turn) => {
               turn.thinking += text;
             });
-          } else if (event.type === "tool" && event.name !== undefined) {
-            const tool: Tool = { name: event.name, input: event.input };
+          } else if (event.type === "tool" && event.id !== undefined && event.name !== undefined) {
+            const tool: Tool = {
+              id: event.id,
+              name: event.name,
+              input: event.input,
+              failed: event.failed === true,
+            };
             patch((turn) => {
-              turn.tools = [...turn.tools, tool];
+              // Upsert. The same call arrives twice — once on announcement,
+              // once with its finished arguments — and appending both would
+              // print every query the analyst ran two times over.
+              const at = turn.tools.findIndex((existing) => existing.id === tool.id);
+              turn.tools = at === -1
+                ? [...turn.tools, tool]
+                : turn.tools.map((existing, i) => (i === at ? { ...existing, ...tool } : existing));
               if (tool.name.startsWith("execute_query")) turn.queried = true;
             });
           } else if (event.type === "error" && event.message !== undefined) {
@@ -192,9 +219,9 @@ export default function AnalystPage() {
           </p>
           <h2 style={{ fontSize: 32, marginTop: 6 }}>Ask what the fleet did.</h2>
           <p className="hint" style={{ marginTop: 6, maxWidth: "68ch" }}>
-            Claude reads the fleet subgraph through The Graph&rsquo;s Subgraph MCP server — mints, record writes, role
-            changes and heartbeats, in one index. It answers in sentences and shows the GraphQL it ran, so you can
-            check it.
+            The model reads the fleet subgraph through The Graph&rsquo;s Subgraph MCP server — mints, record writes,
+            role changes and heartbeats, in one index. It answers in sentences and shows the GraphQL it ran, so you
+            can check it.
           </p>
           <div className="notice paper" style={{ marginTop: 16 }}>
             <span className="tag ink">Why a subgraph</span>
@@ -251,9 +278,10 @@ export default function AnalystPage() {
                           "running a query" tells you what for. */}
                       {turn.tools.length > 0 && (
                         <div className="col" style={{ gap: 4, marginBottom: turn.text === "" ? 0 : 12 }}>
-                          {turn.tools.map((tool, t) => (
-                            <div key={t} className="hint mono" style={{ fontSize: 11 }}>
+                          {turn.tools.map((tool) => (
+                            <div key={tool.id} className="hint mono" style={{ fontSize: 11 }}>
                               → {toolLabel(tool.name)}
+                              {tool.failed === true ? " — failed" : ""}
                             </div>
                           ))}
                         </div>
@@ -295,11 +323,11 @@ export default function AnalystPage() {
                         </details>
                       )}
 
-                      {turn.tools.map((tool, t) => {
+                      {turn.tools.map((tool) => {
                         const query = queryOf(tool.input);
                         if (query === null) return null;
                         return (
-                          <details key={`q${t}`} style={{ marginTop: 14 }}>
+                          <details key={`q${tool.id}`} style={{ marginTop: 14 }}>
                             <summary className="label" style={{ cursor: "pointer" }}>
                               The query it ran
                             </summary>

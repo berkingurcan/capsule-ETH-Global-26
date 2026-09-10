@@ -1,62 +1,93 @@
 /**
  * POST /api/analyst — the fleet, asked in plain language.
  *
- * Claude with one toolset: The Graph's Subgraph MCP server, pointed at the
- * fleet subgraph. The model reads the schema, writes GraphQL, runs it against
- * a live Graph provider, and answers from the rows that come back.
+ * GPT with one tool: The Graph's Subgraph MCP server, pointed at the fleet
+ * subgraph. The model reads the schema, writes GraphQL, runs it against a live
+ * Graph provider, and answers from the rows that come back.
  *
- * ## Why this is an MCP connector and not a tool this file implements
+ * ## Why this is a hosted MCP tool and not three tools this file implements
  *
- * The obvious build is three custom tools — `get_schema`, `run_query`,
+ * The obvious build is three custom functions — `get_schema`, `run_query`,
  * `list_capsules` — wrapping our own subgraph URL. It would work, and it would
  * be a worse demonstration of the thing being demonstrated. Subgraph MCP is a
  * standard interface to *any* subgraph on the network: the same server that
  * answers this route's questions answers them about Uniswap, and the reason
  * our fleet is reachable through it is that the subgraph publishes a schema in
- * the shape every other subgraph publishes one. Writing a bespoke wrapper
- * would hide exactly the property worth showing.
+ * the shape every other subgraph publishes one. A bespoke wrapper would hide
+ * exactly the property worth showing.
  *
- * It also means the connection is made server-side by Anthropic rather than by
- * a proxy we run: `mcp_servers` + an `mcp_toolset` on the same request. Two
- * halves, both required — a server with no toolset referencing it is rejected
- * as a validation error, not silently ignored.
+ * It also means OpenAI opens the MCP connection server-side. There is no
+ * `mcp-remote` proxy to run, and the Graph gateway key is sent to the
+ * Responses API as a request header and nowhere else — never to the browser,
+ * never into a log line, never into the response body.
+ *
+ * ## `require_approval: "never"` is load-bearing
+ *
+ * The Responses API defaults to pausing the stream on an `mcp_approval_request`
+ * and waiting for the caller to send an `mcp_approval_response`. This route
+ * has no second turn in it, so the default would hang every question until the
+ * request timed out. Skipping approvals is safe here for a specific reason and
+ * not as a general habit: every tool this server exposes is a read, the
+ * subgraph it reads is ours, and the key it authenticates with can do nothing
+ * but query.
  *
  * ## What this route will not do
  *
  * It will not answer without querying. The system prompt says so, and the
  * response says which tools ran, so an answer that arrives with no
  * `execute_query_*` behind it is visibly an answer the model made up. The page
- * renders the query alongside the sentence for the same reason: a natural
- * language interface over financial-adjacent data is only worth anything if
- * you can check it.
- *
- * The Graph API key never reaches the browser. It is sent to the Messages API
- * as the MCP server's `authorization_token` and nowhere else.
+ * renders the GraphQL alongside the sentence for the same reason: a natural
+ * language interface over chain data is only worth anything if you can check
+ * it.
  */
-import Anthropic from "@anthropic-ai/sdk";
+import OpenAI from "openai";
 import { NextResponse } from "next/server";
 import { InvalidEnvError, MissingEnvError, loadAnalystEnv } from "@/lib/capsule/env";
 
-/** Node, not edge: the Anthropic SDK and a long-lived stream want it. */
+/** Node, not edge: the OpenAI SDK and a long-lived stream want it. */
 export const runtime = "nodejs";
 /** An answer that queried a subgraph is never the same twice. */
 export const dynamic = "force-dynamic";
 /** Tool round trips through a hosted MCP server take longer than the default. */
 export const maxDuration = 120;
 
-/** The Graph's hosted Subgraph MCP server. */
-const SUBGRAPH_MCP_URL = "https://subgraphs.mcp.thegraph.com/sse";
-const SERVER_NAME = "subgraph";
+/**
+ * The model.
+ *
+ * Named here rather than in the environment because it is not a deployment
+ * setting: this route's system prompt, its tool budget and its "answer in two
+ * sentences" instruction are all written for a reasoning model that can plan a
+ * couple of GraphQL queries. Swapping the model is a code change, and should
+ * come with a look at the prompt.
+ *
+ * Not to be confused with `agent-model` on a capsule's ENS name, which is the
+ * model that *capsule* runs and is read off the chain per agent.
+ */
+const MODEL = "gpt-5.6-luna";
 
 /**
- * Deliberately not the streaming default of ~64000.
+ * Ask for reasoning summaries, so the page can show its working.
+ *
+ * The one parameter here whose support on this model has not been verified
+ * against a live call. If the API rejects it, the request 400s with a message
+ * naming `reasoning` and the page prints it — set this to false and the route
+ * works with no other change, losing only the "How it got there" panel.
+ */
+const REASONING_SUMMARY = true;
+
+/** The Graph's hosted Subgraph MCP server. */
+const SUBGRAPH_MCP_URL = "https://subgraphs.mcp.thegraph.com/sse";
+const SERVER_LABEL = "subgraph";
+
+/**
+ * Deliberately not a large ceiling.
  *
  * The output here is a paragraph and, at most, a short table — the volume in
  * this conversation is tool *results* coming back in, not tokens going out.
- * `max_tokens` also has to cover adaptive thinking, so this is sized for "a
- * few tool round trips and a considered answer" rather than for prose.
+ * On a reasoning model this also has to cover the reasoning, so it is sized
+ * for "a few tool round trips and a considered answer" rather than for prose.
  */
-const MAX_TOKENS = 16000;
+const MAX_OUTPUT_TOKENS = 16000;
 
 /** Anything longer is not a question about a fleet of four agents. */
 const MAX_QUESTION = 500;
@@ -79,7 +110,7 @@ type Body = {
  * the whole point of this system is that a stopped capsule is usually someone
  * pulling a role on purpose.
  */
-function systemPrompt(subgraphId: string): string {
+function instructions(subgraphId: string): string {
   return `You are the fleet analyst for Capsule, reading a subgraph of AI agents that live as ENSv2 names on Ethereum Sepolia.
 
 ## What you are looking at
@@ -115,7 +146,7 @@ All timestamps are Unix seconds. Compare them to each other rather than to your 
 
 ## How to answer
 
-- Query first. Never answer a question about the fleet from this prompt alone — this prompt describes the shape of the data, not its contents.
+- Query first. Never answer a question about the fleet from these instructions alone — they describe the shape of the data, not its contents.
 - Lead with one sentence that answers the question. Then the specifics.
 - Name names. \`analyst.capsulefleet.eth\`, not "one of the agents".
 - Give numbers as they came back. Never round a count, never estimate a timestamp, never fill a gap with a plausible value.
@@ -130,7 +161,7 @@ export async function POST(request: Request): Promise<Response> {
     env = loadAnalystEnv();
   } catch (error) {
     if (error instanceof MissingEnvError || error instanceof InvalidEnvError) {
-      // Named, because the two variables this needs are exactly the two a
+      // Named, because the three variables this needs are exactly the three a
       // fresh deployment has not set, and "the analyst is unavailable" would
       // send someone reading logs.
       return NextResponse.json({ error: error.message }, { status: 503 });
@@ -157,38 +188,44 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   const history = parseHistory(body.history);
+  const client = new OpenAI({ apiKey: env.openaiApiKey });
 
-  const client = new Anthropic({ apiKey: env.anthropicApiKey });
-
-  const stream = client.beta.messages.stream({
-    model: "claude-opus-5",
-    max_tokens: MAX_TOKENS,
-    betas: ["mcp-client-2025-11-20", "server-side-fallback-2026-07-01"],
-    // A safety refusal on "which agent stopped beating" is not a live risk,
-    // but a refusal arrives as a 200 with no content and this route has no
-    // second attempt in it. `"default"` routes by refusal category rather than
-    // pinning a model list that would go stale.
-    fallbacks: "default",
-    system: systemPrompt(env.subgraphId),
-    // Adaptive, and displayed. Working out which entity answers a question is
-    // the interesting part of this route, and a page that shows the GraphQL
-    // but hides the reasoning that chose it is showing the less useful half.
-    thinking: { type: "adaptive", display: "summarized" },
-    mcp_servers: [
-      {
-        type: "url",
-        url: SUBGRAPH_MCP_URL,
-        name: SERVER_NAME,
-        // Server-side only. This is a Graph gateway key and it is never sent
-        // to the browser, logged, or written into a response.
-        authorization_token: env.graphApiKey,
-      },
-    ],
-    // Required alongside `mcp_servers` — a server that no toolset references
-    // is a validation error rather than an unused connection.
-    tools: [{ type: "mcp_toolset", mcp_server_name: SERVER_NAME }],
-    messages: [...history, { role: "user", content: question }],
-  });
+  let stream;
+  try {
+    stream = await client.responses.create({
+      model: MODEL,
+      instructions: instructions(env.subgraphId),
+      input: [...history, { role: "user" as const, content: question }],
+      max_output_tokens: MAX_OUTPUT_TOKENS,
+      ...(REASONING_SUMMARY ? { reasoning: { summary: "auto" as const } } : {}),
+      tools: [
+        {
+          type: "mcp",
+          server_label: SERVER_LABEL,
+          server_description: "The Graph's Subgraph MCP server — schemas and GraphQL over indexed chain data.",
+          server_url: SUBGRAPH_MCP_URL,
+          // The gateway key, as the exact header The Graph documents:
+          // `Authorization: Bearer <key>`. Sent through `headers` rather than
+          // through the tool's `authorization` field because that field is
+          // specified as an OAuth access token — this is an API key that
+          // happens to travel as a bearer token, and spelling the header out
+          // leaves nothing for the two to disagree about.
+          headers: { Authorization: `Bearer ${env.graphApiKey}` },
+          // See the note at the top of this file. Without it the stream stops
+          // on the first tool call and waits for a turn this route never takes.
+          require_approval: "never",
+        },
+      ],
+      stream: true,
+    });
+  } catch (error) {
+    // A failure here is before the first byte, so it can still be a status —
+    // which is worth keeping, because this is where a bad key, an unknown
+    // model or an unsupported parameter lands.
+    const status = error instanceof OpenAI.APIError ? (error.status ?? 502) : 502;
+    const message = error instanceof Error ? error.message : "the analyst could not start";
+    return NextResponse.json({ error: message }, { status });
+  }
 
   const encoder = new TextEncoder();
 
@@ -205,54 +242,75 @@ export async function POST(request: Request): Promise<Response> {
         controller.enqueue(encoder.encode(`${JSON.stringify(event)}\n`));
       };
 
-      // MCP tool inputs arrive as `input_json_delta` fragments across many
-      // events, keyed by content block index. They are accumulated here and
-      // parsed once the block closes — never string-matched, because the
-      // escaping in a partial JSON fragment is not the escaping in the value.
-      const pending = new Map<number, { name: string; json: string }>();
-
       try {
         for await (const event of stream) {
           switch (event.type) {
-            case "content_block_start": {
-              const block = event.content_block as { type: string; name?: string };
-              if (block.type === "mcp_tool_use") {
-                pending.set(event.index, { name: block.name ?? "unknown", json: "" });
-              } else if (block.type === "mcp_tool_result") {
-                const result = event.content_block as { is_error?: boolean };
-                send({ type: "tool_result", isError: result.is_error === true });
-              }
+            case "response.output_text.delta":
+              send({ type: "text", text: event.delta });
               break;
-            }
-            case "content_block_delta": {
-              if (event.delta.type === "text_delta") {
-                send({ type: "text", text: event.delta.text });
-              } else if (event.delta.type === "thinking_delta") {
-                send({ type: "thinking", text: event.delta.thinking });
-              } else if (event.delta.type === "input_json_delta") {
-                const open = pending.get(event.index);
-                if (open !== undefined) open.json += event.delta.partial_json;
-              }
-              break;
-            }
-            case "content_block_stop": {
-              const open = pending.get(event.index);
-              if (open !== undefined) {
-                pending.delete(event.index);
-                send({ type: "tool", name: open.name, input: safeParse(open.json) });
-              }
-              break;
-            }
-          }
-        }
 
-        const message = await stream.finalMessage();
-        // Refusals arrive as a 200 with no useful content, so the page has to
-        // be told rather than left rendering an empty bubble.
-        if (message.stop_reason === "refusal") {
-          send({ type: "error", message: "The model declined to answer that." });
-        } else if (message.stop_reason === "max_tokens") {
-          send({ type: "error", message: "The answer ran past its length limit — try a narrower question." });
+            case "response.reasoning_summary_text.delta":
+              send({ type: "thinking", text: event.delta });
+              break;
+
+            // A tool call appears twice on purpose. `added` carries the name
+            // and nothing else, which is what makes the page able to say
+            // "running a query" while the arguments are still streaming;
+            // `done` carries the finished arguments, which is the GraphQL the
+            // answer has to be checkable against. The page upserts on
+            // `item.id`, so the second overwrites the first.
+            case "response.output_item.added": {
+              const item = event.item;
+              if (item.type === "mcp_call") {
+                send({ type: "tool", id: item.id, name: item.name });
+              }
+              break;
+            }
+
+            case "response.output_item.done": {
+              const item = event.item;
+              if (item.type === "mcp_call") {
+                send({
+                  type: "tool",
+                  id: item.id,
+                  name: item.name,
+                  input: safeParse(item.arguments),
+                  failed: item.error !== null && item.error !== undefined,
+                });
+              }
+              break;
+            }
+
+            case "response.mcp_call.failed":
+              // The tool itself failed — a bad gateway key, a subgraph id that
+              // does not resolve, a query the index rejected. The model may
+              // still recover by trying something else, so this is reported
+              // and not treated as the end of the answer.
+              send({ type: "tool_failed" });
+              break;
+
+            case "response.failed": {
+              const detail = event.response.error;
+              send({ type: "error", message: detail?.message ?? "the model run failed" });
+              break;
+            }
+
+            case "response.incomplete": {
+              const reason = event.response.incomplete_details?.reason;
+              send({
+                type: "error",
+                message:
+                  reason === "max_output_tokens"
+                    ? "The answer ran past its length limit — try a narrower question."
+                    : `The run stopped early (${reason ?? "unknown reason"}).`,
+              });
+              break;
+            }
+
+            case "error":
+              send({ type: "error", message: event.message ?? "the stream errored" });
+              break;
+          }
         }
         send({ type: "done" });
       } catch (error) {
@@ -260,7 +318,7 @@ export async function POST(request: Request): Promise<Response> {
         // response is already streaming. So a failure is an event, and the
         // page renders it as the analyst saying it could not answer.
         const message =
-          error instanceof Anthropic.APIError
+          error instanceof OpenAI.APIError
             ? `${error.status ?? ""} ${error.message}`.trim()
             : error instanceof Error
               ? error.message
@@ -273,7 +331,7 @@ export async function POST(request: Request): Promise<Response> {
     },
     cancel() {
       // The reader went away — a closed tab, a navigation. Stop paying for it.
-      stream.abort();
+      stream.controller.abort();
     },
   });
 
@@ -288,7 +346,7 @@ export async function POST(request: Request): Promise<Response> {
   });
 }
 
-/** Tool inputs are JSON. A fragment that did not close is reported, not guessed at. */
+/** Tool arguments are a JSON string. A fragment that did not close is reported, not guessed at. */
 function safeParse(json: string): unknown {
   try {
     return JSON.parse(json);
@@ -300,7 +358,7 @@ function safeParse(json: string): unknown {
 /**
  * Prior turns, trimmed and re-typed.
  *
- * Only text is carried back. Tool uses and their results are deliberately
+ * Only text is carried back. Tool calls and their results are deliberately
  * dropped: replaying them would let a follow-up answer from a previous
  * query's rows, and the fleet moves between questions.
  */
@@ -314,8 +372,8 @@ function parseHistory(raw: unknown): Turn[] {
     if (typeof content !== "string" || content.trim() === "") continue;
     turns.push({ role, content: content.slice(0, MAX_QUESTION * 4) });
   }
-  // Keep the most recent turns, and start on a user turn — the Messages API
-  // rejects a history that opens with an assistant reply to nothing.
+  // Keep the most recent turns, and start on a user turn — a history that
+  // opens with an assistant reply to nothing is not a conversation.
   const tail = turns.slice(-MAX_HISTORY);
   while (tail.length > 0 && tail[0].role !== "user") tail.shift();
   return tail;

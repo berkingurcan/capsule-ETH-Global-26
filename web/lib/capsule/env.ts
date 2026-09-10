@@ -292,7 +292,16 @@ export function loadProvisionerEnv(): ProvisionerEnv {
  * use.
  */
 export type AnalystEnv = {
-  anthropicApiKey: string;
+  /**
+   * The app's OWN key, for the analyst route — not an agent's.
+   *
+   * Worth stating because `providers.ts` also names `OPENAI_API_KEY`: that one
+   * is the variable an agent's *container* receives, and its value comes out of
+   * the encrypted `capsule_secret` store per owner. This one is read from this
+   * deployment's environment and is spent by `/api/analyst` alone. Same name,
+   * two different keys, two different blast radii.
+   */
+  openaiApiKey: string;
   /** A Graph gateway API key from Subgraph Studio. Never reaches the browser. */
   graphApiKey: string;
   /**
@@ -304,7 +313,7 @@ export type AnalystEnv = {
 };
 
 export function loadAnalystEnv(): AnalystEnv {
-  const anthropicApiKey = requireEnv("ANTHROPIC_API_KEY");
+  const openaiApiKey = requireEnv("OPENAI_API_KEY");
   const graphApiKey = requireEnv("GRAPH_API_KEY");
   const subgraphId = requireEnv("SUBGRAPH_ID");
 
@@ -319,5 +328,5 @@ export function loadAnalystEnv(): AnalystEnv {
     );
   }
 
-  return { anthropicApiKey, graphApiKey, subgraphId };
+  return { openaiApiKey, graphApiKey, subgraphId };
 }
