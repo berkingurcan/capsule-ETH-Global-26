@@ -271,3 +271,53 @@ export function loadProvisionerEnv(): ProvisionerEnv {
 
   return { funderKey, funderAddress, agentFundingWei, machineMemoryMb, tickSeconds, heartbeatSeconds };
 }
+
+////////////////////////////////////////////////////////////////////////////
+// The analyst
+////////////////////////////////////////////////////////////////////////////
+
+/**
+ * What `POST /api/analyst` needs, and nothing else needs.
+ *
+ * Kept out of `ServerEnv` for the same reason the funder key is: `loadServerEnv()`
+ * runs on every page render, and a deployment that never opens /analyst should
+ * not fail to draw a dashboard for want of two API keys.
+ *
+ * `SUBGRAPH_URL` is deliberately NOT in here even though the analyst is about
+ * the same subgraph. The fleet dashboard queries the index directly over its
+ * Studio query URL; the analyst reaches it through The Graph's hosted Subgraph
+ * MCP server, which addresses subgraphs by id and authenticates with a gateway
+ * key. Two different credentials for two different doors, and collapsing them
+ * into one variable would mean setting a key that one of the two paths cannot
+ * use.
+ */
+export type AnalystEnv = {
+  anthropicApiKey: string;
+  /** A Graph gateway API key from Subgraph Studio. Never reaches the browser. */
+  graphApiKey: string;
+  /**
+   * The subgraph's id in Subgraph Studio — what `execute_query_by_subgraph_id`
+   * takes, and what pins the analyst to the fleet rather than to whichever
+   * subgraph a keyword search happened to surface.
+   */
+  subgraphId: string;
+};
+
+export function loadAnalystEnv(): AnalystEnv {
+  const anthropicApiKey = requireEnv("ANTHROPIC_API_KEY");
+  const graphApiKey = requireEnv("GRAPH_API_KEY");
+  const subgraphId = requireEnv("SUBGRAPH_ID");
+
+  // Studio subgraph ids are base58 and about 46 characters. The check is loose
+  // on purpose — the format is not ours to pin — but a URL pasted in here is a
+  // mistake worth catching, because the failure it causes is the MCP server
+  // reporting that no such subgraph exists, several seconds into a stream.
+  if (subgraphId.includes("/") || subgraphId.includes(":")) {
+    throw new InvalidEnvError(
+      "SUBGRAPH_ID",
+      "looks like a URL — it is the subgraph's id in Subgraph Studio, not its query endpoint",
+    );
+  }
+
+  return { anthropicApiKey, graphApiKey, subgraphId };
+}

@@ -75,8 +75,12 @@ export default function FleetView({ fleet }: { fleet: Fleet }) {
               {fleet.parent} has minted {capsules.length} agent{capsules.length === 1 ? "" : "s"}
             </h2>
             <p className="hint" style={{ marginTop: 6 }}>
-              Every value below was read from ETH Sepolia at block {fleet.block.toString()} — the records from the
-              resolver, the status from the role behind them.
+              Every value below came off ETH Sepolia at block {fleet.block.toString()} — the records from the
+              resolver, the status from the role behind them
+              {fleet.source === "subgraph"
+                ? ", joined in the subgraph rather than in this page"
+                : ", scanned from the chain"}
+              .
             </p>
           </div>
           {/* "Another" means another under this parent — the one named in the
@@ -131,8 +135,17 @@ export default function FleetView({ fleet }: { fleet: Fleet }) {
           </div>
         </div>
 
+        {/* Provenance, and it is not a footnote. A subgraph lags, and a beat
+            that has landed on chain but not yet in the index reads on this
+            page as silence — which is the one thing this dashboard must never
+            be quietly wrong about. So the source and the lag are printed
+            wherever the block number is. */}
         <p className="hint" style={{ marginTop: 26 }}>
-          Read at block {fleet.block.toString()} · minter {fleet.minter}
+          Read at block {fleet.block.toString()} · minter {fleet.minter} ·{" "}
+          {fleet.source === "subgraph" ? "via subgraph" : "via eth_getLogs"}
+          {fleet.lagBlocks !== null && fleet.lagBlocks > 0
+            ? ` · ${fleet.lagBlocks} block${fleet.lagBlocks === 1 ? "" : "s"} behind the head`
+            : ""}
         </p>
       </div>
 

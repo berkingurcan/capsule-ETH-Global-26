@@ -1,0 +1,86 @@
+# The Capsule fleet subgraph — ETH Sepolia.
+#
+# One static data source and one template, and the split is forced by the
+# protocol rather than chosen: `CapsuleMinter` lives at one address for every
+# parent it serves, but there is no single resolver. Every ENS name that
+# connects gets its OWN `PermissionedResolver`, deployed as a UUPS proxy
+# through VerifiableFactory, and its address is not knowable when this file is
+# written.
+#
+# `ParentConnected` is what publishes it. So the minter's handler spawns a
+# resolver data source the moment a name connects, which is the same discovery
+# the runner does at boot through UniversalResolverV2 — done once, at index
+# time, instead of on every read.
+#
+# startBlock is the minter's deploy block. Scanning from 0 would work here and
+# would also spend a day of indexing on a chain that had no capsules in it.
+specVersion: 1.0.0
+description: AI agents as ENSv2 names — mints, records, roles and heartbeats in one index.
+repository: https://github.com/berkingurcan/capsule
+indexerHints:
+  # Every entity this subgraph answers from is current-state or recent history;
+  # nothing queries a block from last week. `auto` lets the indexer prune the
+  # history it no longer needs to serve those.
+  prune: auto
+schema:
+  file: ./schema.graphql
+dataSources:
+  - kind: ethereum
+    name: CapsuleMinter
+    network: sepolia
+    source:
+      address: "0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51"
+      abi: CapsuleMinter
+      startBlock: 11669320
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      file: ./src/minter.ts
+      entities:
+        - Fleet
+        - Parent
+        - ParentByNode
+        - Capsule
+        - ResourceRef
+        - ResolverSource
+      abis:
+        - name: CapsuleMinter
+          file: ./abis/CapsuleMinter.json
+      eventHandlers:
+        - event: ParentConnected(indexed bytes32,indexed address,indexed address,address,bool)
+          handler: handleParentConnected
+        - event: ParentDisconnected(indexed bytes32,indexed address,address)
+          handler: handleParentDisconnected
+        - event: CapsuleMinted(indexed bytes32,indexed bytes32,indexed address,address,uint256,string,uint64)
+          handler: handleCapsuleMinted
+templates:
+  - kind: ethereum
+    name: PermissionedResolver
+    network: sepolia
+    source:
+      abi: PermissionedResolver
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.9
+      language: wasm/assemblyscript
+      file: ./src/resolver.ts
+      entities:
+        - Fleet
+        - Capsule
+        - RecordWrite
+        - Heartbeat
+        - RoleChange
+        - ResourceRef
+      abis:
+        - name: PermissionedResolver
+          file: ./abis/PermissionedResolver.json
+      eventHandlers:
+        # A resolver serves every name its owner has, not only capsules. Both
+        # handlers below return early for a node this subgraph has never minted.
+        - event: TextChanged(indexed bytes32,indexed string,string,string)
+          handler: handleTextChanged
+        - event: AddrChanged(indexed bytes32,address)
+          handler: handleAddrChanged
+        - event: EACRolesChanged(indexed uint256,indexed address,uint256,uint256)
+          handler: handleRolesChanged

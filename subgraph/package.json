@@ -1,0 +1,23 @@
+{
+  "name": "capsule-fleet-subgraph",
+  "version": "0.1.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Mints, records, roles and heartbeats for Capsule's ENSv2 agent names, in one index",
+  "scripts": {
+    "codegen": "graph codegen",
+    "build": "graph build",
+    "test": "graph test",
+    "auth": "graph auth",
+    "deploy": "graph deploy capsule-fleet --node https://api.studio.thegraph.com/deploy/ --ipfs https://ipfs.satsuma.xyz",
+    "create-local": "graph create --node http://localhost:8020/ capsule-fleet",
+    "deploy-local": "graph deploy --node http://localhost:8020/ --ipfs http://localhost:5001 capsule-fleet"
+  },
+  "dependencies": {
+    "@graphprotocol/graph-cli": "0.98.1",
+    "@graphprotocol/graph-ts": "0.38.2"
+  },
+  "devDependencies": {
+    "matchstick-as": "0.6.0"
+  }
+}

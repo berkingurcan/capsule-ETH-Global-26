@@ -10,10 +10,19 @@
  * Failure is returned, never thrown. An unreachable RPC or a missing variable
  * should render a page that says which one, because the alternative — a 500
  * during a demo — tells the viewer only that something is broken.
+ *
+ * ## Two readers, one type
+ *
+ * `SUBGRAPH_URL` set means the fleet is read from the index — one query, the
+ * three-way join already done, and fields no log scan can produce. Unset, or
+ * failing, means the chain reader in `fleet.ts`, which is slower and answers
+ * from the head. Both return the same `Fleet`, and `Fleet.source` says which
+ * one did, because the difference is a real one: an index lags.
  */
 import { createServerClient } from "./chain";
-import { loadServerEnv } from "./env";
+import { loadServerEnv, optionalEnv } from "./env";
 import { readFleet, type Capsule, type Fleet } from "./fleet";
+import { readFleetFromSubgraph, SubgraphError } from "./fleet-graph";
 import { encodeParent, readOwnerParents, type OwnedParent } from "./parent";
 
 export type FleetResult = { ok: true; fleet: Fleet } | { ok: false; error: string };
@@ -30,6 +39,33 @@ export async function loadFleet(parentName?: string): Promise<FleetResult> {
     const env = loadServerEnv();
     const parent = encodeParent(parentName ?? env.defaultParentName);
     const client = createServerClient(env.rpcUrl);
+
+    const subgraphUrl = optionalEnv("SUBGRAPH_URL");
+    if (subgraphUrl !== undefined) {
+      try {
+        // The head costs one call and is the only reason this path touches an
+        // RPC at all. It buys `lagBlocks` — how far behind the index was when
+        // it answered — which is the one thing a subgraph cannot tell you
+        // about itself and the one thing a liveness dashboard has to say.
+        const head = await client.getBlockNumber();
+        const fleet = await readFleetFromSubgraph({
+          url: subgraphUrl,
+          minter: env.minterAddress,
+          parentName: parent.name,
+          head,
+        });
+        return { ok: true, fleet };
+      } catch (error) {
+        if (!(error instanceof SubgraphError)) throw error;
+        // Fall through to the chain. A subgraph that is down, still syncing or
+        // has hit an indexing error must not take the dashboard with it — the
+        // chain reader is slower and always correct, and this is the one place
+        // in the app where a silent fallback is right rather than lazy,
+        // because `Fleet.source` makes it visible on the page.
+        console.warn(`subgraph read failed, falling back to the chain: ${error.message}`);
+      }
+    }
+
     const fleet = await readFleet(client, {
       minter: env.minterAddress,
       parentName: parent.name,
