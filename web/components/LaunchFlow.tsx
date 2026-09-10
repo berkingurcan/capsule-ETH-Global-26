@@ -2,10 +2,10 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { formatEther, type Address } from "viem";
+import { formatEther, zeroAddress, type Address, type Hex } from "viem";
 import Capsule from "@/components/Capsule";
 import { CHAIN } from "@/lib/capsule/chain";
-import { RECORD_KEYS } from "@/lib/capsule/records";
+import { POLICY_KEYS, RECORD_KEYS } from "@/lib/capsule/records";
 import { shortAddress, useWallet } from "@/lib/wallet/WalletProvider";
 import { ROLES, capColor, type Role } from "@/lib/capsule/roles";
 import { DEFAULT_PARENT_DISPLAY, DEFAULT_PARENT_MISSING } from "@/lib/capsule/public-env";
@@ -18,6 +18,12 @@ import {
 } from "@/lib/capsule/parent";
 import { labelProblems, telegramTokenProblems } from "@/lib/capsule/prepare";
 import { mintCapsule, MintError, type MintReceipt } from "@/lib/capsule/mint";
+import {
+  setSpendCap,
+  SpendCapError,
+  spendCapEnables,
+  spendCapProblems,
+} from "@/lib/capsule/spend";
 import {
   prepareCapsuleRequest,
   PrepareError,
@@ -96,6 +102,18 @@ type Draft = {
    * what that costs. What it costs is on the form, next to the field.
    */
   providerKey: string;
+  /**
+   * `agent-spend-cap` — the most one transaction from this agent may move, in
+   * ETH. Empty means the capsule launches unable to spend, which is both the
+   * default and the state every capsule minted before this existed is in.
+   *
+   * Not part of the mint. `CapsuleMinter` does not write this key — no deployed
+   * minter knows it exists — so a non-empty value costs a second transaction,
+   * sent by the owner straight after the mint. See `lib/capsule/spend.ts`.
+   *
+   * Named `spendCap` and not `cap`: `cap` is already this draft's role colour.
+   */
+  spendCap: string;
 };
 
 /** The provider half of a draft's model reference. */
@@ -147,6 +165,9 @@ function draftProblems(draft: Draft, taken: string[]): string[] {
     const provider = providerOf(draft);
     problems.push(`an API key for ${provider ?? "the model's provider"} is required`);
   }
+  // Only a malformed value is a problem. An empty one is the default and means
+  // the capsule cannot spend, which is a perfectly good capsule.
+  for (const m of spendCapProblems(draft.spendCap)) problems.push(`${POLICY_KEYS.spendCap} ${m}`);
   return problems;
 }
 
@@ -165,6 +186,9 @@ function draftFrom(r: Role): Draft {
     handle: "",
     token: "",
     providerKey: "",
+    // Off. Turning a wallet on is a decision an owner makes deliberately, not
+    // one a preset makes for them.
+    spendCap: "",
   };
 }
 
@@ -180,6 +204,7 @@ function customDraft(slug: string): Draft {
     handle: "",
     token: "",
     providerKey: "",
+    spendCap: "",
   };
 }
 
@@ -996,6 +1021,44 @@ function StepConfigure({
             </span>
           </div>
 
+          <div className="field">
+            <label className="label" htmlFor="spend">
+              {POLICY_KEYS.spendCap} · optional
+            </label>
+            <div className="row" style={{ gap: 0 }}>
+              <input
+                id="spend"
+                className="input"
+                inputMode="decimal"
+                placeholder="0.00 — the agent cannot spend"
+                value={d.spendCap}
+                onChange={(e) => patch(i, { spendCap: e.target.value.replace(/[^0-9.]/g, "") })}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <span
+                className="mono"
+                style={{ fontSize: 12.5, color: "var(--muted)", padding: "0 0 0 8px", whiteSpace: "nowrap" }}
+              >
+                ETH
+              </span>
+            </div>
+            <span className="hint">
+              The most one transaction from this agent may move. Leave it empty and the capsule launches unable to
+              spend — that is the default, and you can turn it on later from a wallet. The minter does not write
+              this key, so a value here costs{" "}
+              <strong>one extra transaction</strong> after the mint, signed by you.
+              {spendCapEnables(d.spendCap) && (
+                <>
+                  {" "}
+                  The agent can never raise it: its write permission covers{" "}
+                  <span className="mono">{RECORD_KEYS.heartbeat}</span> alone, so the same resolver rule that stops
+                  it rewriting its own prompt stops it rewriting this. Set it to{" "}
+                  <span className="mono">0</span> later and it stops spending within 30 seconds, still running.
+                </>
+              )}
+            </span>
+          </div>
+
           {problems.length > 0 && (
             <div className="notice" style={{ borderColor: "var(--line)" }}>
               <span className="tag">Not ready</span>
@@ -1034,6 +1097,13 @@ function StepConfigure({
               {"\n"}
               <span className="d">{RECORD_KEYS.heartbeat} </span>
               <span className="g">written by the agent</span>
+              {"\n"}
+              <span className="d">{POLICY_KEYS.spendCap} </span>
+              {spendCapEnables(d.spendCap) ? (
+                <span className="y">{d.spendCap.trim()} — a second transaction, after the mint</span>
+              ) : (
+                <span className="w">unset — this agent cannot spend</span>
+              )}
             </pre>
           </div>
         </div>
@@ -1074,9 +1144,29 @@ type Run = {
    *  leave the first one's sealed rows addressed by nothing. */
   prepared: PrepareResult | null;
   receipt: MintReceipt | null;
+  /** The `agent-spend-cap` transaction, when the owner asked for one. */
+  spendHash: Hex | null;
+  /**
+   * Why the spending cap did not land, if it did not.
+   *
+   * Deliberately separate from `error`. `error` means the capsule does not
+   * exist; this means it does, it is live, it heartbeats and answers, and the
+   * one thing it cannot do yet is spend. Collapsing the two would report a
+   * rejected optional transaction as a failed mint, and send an owner off to
+   * re-mint a name that is already theirs.
+   */
+  spendWarning: string | null;
 };
 
-const IDLE: Run = { phase: "idle", lines: [], error: null, prepared: null, receipt: null };
+const IDLE: Run = {
+  phase: "idle",
+  lines: [],
+  error: null,
+  prepared: null,
+  receipt: null,
+  spendHash: null,
+  spendWarning: null,
+};
 
 function StepMint({
   drafts,
@@ -1218,7 +1308,45 @@ function StepMint({
       update(i, { phase: "done", receipt, error: null });
       say(i, `CapsuleMinted · token ${receipt.tokenId} · block ${receipt.blockNumber}`);
       say(i, `${receipt.gasUsed.toLocaleString()} gas · ${draft.slug}.${parent.parent.name} is live on chain`);
+      // Before the spend cap, always. The capsule exists now, and it has to be
+      // recorded as existing before anything optional is attempted on top of it.
       onMinted({ draft, prepared, receipt });
+
+      // The second transaction, and only if the owner asked for one.
+      //
+      // `mint()` cannot do this: no deployed minter knows `agent-spend-cap`
+      // exists. What it does do is grant the owner ROLE_SET_TEXT on their own
+      // name, which is why this works with no contract change — and why it is
+      // the owner's wallet signing rather than ours.
+      //
+      // Every failure here is a warning. The name is minted, the agent is
+      // provisioned on the next step, and a capsule that cannot spend is the
+      // default state of every capsule ever minted before this field existed.
+      if (spendCapEnables(draft.spendCap)) {
+        const cap = draft.spendCap.trim();
+        if (parent.resolver === zeroAddress) {
+          update(i, { spendWarning: `${parentLabel} has no resolver stored — ${POLICY_KEYS.spendCap} was not set` });
+        } else {
+          try {
+            say(i, `${POLICY_KEYS.spendCap} · sign to allow ${cap} ETH per transaction`);
+            const capped = await setSpendCap(
+              { walletClient, publicClient, resolver: parent.resolver, node: receipt.node, cap },
+              (phase, detail) => {
+                if (phase === "mining") say(i, `sent ${detail}`);
+              },
+            );
+            update(i, { spendHash: capped.hash });
+            say(i, `${POLICY_KEYS.spendCap} ${capped.cap} ETH · block ${capped.blockNumber} — this agent can spend`);
+          } catch (error) {
+            const message =
+              error instanceof SpendCapError ? error.message : "the spending cap transaction failed";
+            update(i, { spendWarning: message });
+            say(i, `⚠ ${message}`);
+            say(i, `${draft.slug} is minted and live — it simply cannot spend until ${POLICY_KEYS.spendCap} is set`);
+          }
+        }
+      }
+
       return true;
     } catch (error) {
       const message = error instanceof MintError ? error.message : "the mint failed";
@@ -1249,7 +1377,10 @@ function StepMint({
         <span className="stepnum">04</span>
         <span className="tag">Mint</span>
       </div>
-      <p className="stitle">One transaction does all four things</p>
+      <p className="stitle">
+        One transaction does all four things
+        {queue.some((d) => spendCapEnables(d.spendCap)) ? ", plus one for the spending cap" : ""}
+      </p>
       <p className="ssub">
         Without the minter this is four separate calls per agent. With it, the subname, the records and the heartbeat
         role land together — or none of them do. One signature and one transaction per capsule: the signature seals
@@ -1359,10 +1490,34 @@ function StepMint({
                   {run.phase === "idle" && <span className="d">waiting…</span>}
                 </pre>
                 {run.receipt !== null && (
-                  <div className="row" style={{ padding: "8px 16px", borderTop: "1px solid var(--line)" }}>
+                  <div className="row" style={{ padding: "8px 16px", borderTop: "1px solid var(--line)", gap: 12 }}>
                     <a className="mono hint" style={{ fontSize: 11.5 }} href={txUrl(run.receipt.hash)} target="_blank" rel="noreferrer">
                       {shortHex(run.receipt.hash)} ↗
                     </a>
+                    {run.spendHash !== null && (
+                      <a
+                        className="mono hint"
+                        style={{ fontSize: 11.5 }}
+                        href={txUrl(run.spendHash)}
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        {POLICY_KEYS.spendCap} {shortHex(run.spendHash)} ↗
+                      </a>
+                    )}
+                  </div>
+                )}
+                {run.spendWarning !== null && (
+                  /* A warning, never an error banner. The capsule above it is
+                     minted, live and about to be provisioned — the only thing
+                     that did not happen is optional, and an owner who reads this
+                     as a failed mint will go and mint the name again. */
+                  <div className="row" style={{ padding: "8px 16px", borderTop: "1px solid var(--line)", gap: 8 }}>
+                    <span className="tag">Spending off</span>
+                    <span className="hint" style={{ fontSize: 12 }}>
+                      {run.spendWarning} — the capsule is fine; set{" "}
+                      <span className="mono">{POLICY_KEYS.spendCap}</span> later from a wallet.
+                    </span>
                   </div>
                 )}
               </div>
