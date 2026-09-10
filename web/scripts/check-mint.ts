@@ -326,7 +326,16 @@ async function main() {
         prepared.config.promptPointer === prepared.promptRef && prepared.promptRef !== "",
         prepared.promptRef,
       );
-      check("  capsuleEndpoint is set", prepared.config.capsuleEndpoint !== "", prepared.config.capsuleEndpoint);
+      // Not "is set" — the runner appends `/prompt/:ref` and `/runtime` to this
+      // value and Next serves both under `/api`, so a bare origin satisfies a
+      // non-empty check, mints clean, and strands every agent on a 404 that
+      // `fetchPrompt` reports as "no prompt stored". Assert the shape the
+      // runner will actually build a URL out of.
+      check(
+        "  capsuleEndpoint is the API root",
+        prepared.config.capsuleEndpoint.endsWith("/api"),
+        prepared.config.capsuleEndpoint,
+      );
       check("  every config field is filled", Object.values(prepared.config).every((v) => v !== ""));
 
       // Nothing sealed may come back out. This is the response the browser

@@ -358,7 +358,15 @@ async function handle(input: {
         config: {
           context: prepared.context,
           telegramUrl: prepared.telegramUrl,
-          capsuleEndpoint: env.publicUrl,
+          // The API root, not the site root. The runner appends `/prompt/:ref`
+          // and `/runtime` to whatever this record says (runner/src/prompt.ts,
+          // runner/src/runtime.ts), and Next mounts both under `/api` — so a
+          // bare origin here sends the agent to a page that does not exist. It
+          // boots, resolves every record, signs correctly, and gets a 404 that
+          // `fetchPrompt` reports as "no prompt stored": a missing prefix in
+          // the costume of a missing prompt. `dev/prompt-server.ts` serves
+          // `/prompt` at its root, which is why the dev loop never sees this.
+          capsuleEndpoint: `${env.publicUrl}/api`,
           model: prepared.model,
           runtime: prepared.runtime,
           promptPointer: promptRef,
