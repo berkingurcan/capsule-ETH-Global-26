@@ -76,6 +76,14 @@ export const WALLET_SKILL_PATH = join(WORKSPACE_PATH, "skills", SKILL_NAME, "SKI
  * Derived from this module rather than hardcoded to `/capsule/bin`, because the
  * supervisor runs from a checkout as often as from the image and an agent that
  * can only spend in production is an agent nobody can rehearse with.
+ *
+ * **This is not sufficient on its own, and the Dockerfile's symlink into
+ * /usr/local/bin is not redundant with it.** OpenClaw runs model-chosen commands
+ * through `sh -lc`; a login shell sources /etc/profile and replaces PATH
+ * wholesale, so everything prepended here is gone by the time the command is
+ * looked up. This covers a supervisor started from a shell that does not do
+ * that; the symlink covers the one that does. `dev/gateway-smoke.ts` asserts the
+ * login-shell lookup, which is the one that actually happens.
  */
 export const BIN_PATH = fileURLToPath(new URL("../bin", import.meta.url));
 
@@ -599,6 +607,9 @@ export class Gateway {
         // rather than replacing PATH: the gateway needs its own binaries, and a
         // capsule whose agent cannot run `git` because we tightened its PATH is
         // a capsule with a worse bug than the one we were preventing.
+        //
+        // A login shell throws this away — see BIN_PATH. The image also symlinks
+        // the command into /usr/local/bin, and that is the one the agent finds.
         PATH: `${BIN_PATH}:${process.env.PATH ?? ""}`,
         HOME: process.env.HOME ?? homedir(),
         ...this.#env,

@@ -55,6 +55,25 @@ COPY --chown=node:node src ./src
 # trying to move money.
 COPY --chown=node:node --chmod=755 bin ./bin
 
+# And onto the PATH a *login shell* has, which is the only one that counts.
+#
+# The supervisor prepends /capsule/bin to the gateway child's PATH, and that is
+# not enough. OpenClaw runs model-chosen commands through `sh -lc` — a login
+# shell — which sources /etc/profile and **replaces** PATH with
+# `/usr/local/bin:/usr/bin:/bin:...`. Anything the parent prepended is gone
+# before the command runs.
+#
+# Measured the expensive way: a deployed capsule with a live broker, a correct
+# skill file and its spending policy rendered correctly in its own status block
+# told its owner "the capsule-wallet command is unavailable in this runtime".
+# Everything worked except the one lookup that happens last.
+#
+# A symlink rather than a copy, so there is exactly one script and `bin/` stays
+# the place it lives. /usr/local/bin is first on the login PATH.
+USER root
+RUN ln -sf /capsule/bin/capsule-wallet.mjs /usr/local/bin/capsule-wallet
+USER node
+
 # Exec form, and one process.
 #
 # `npm start` would break the runner's shutdown outright: npm does not forward

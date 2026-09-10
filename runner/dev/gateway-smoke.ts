@@ -32,6 +32,7 @@
  * say so loudly, and the gateway still has to reach `ready` — a capsule that
  * only starts when the internet is perfect is one that stops on a bad minute.
  */
+import { spawnSync } from "node:child_process";
 import { access, readFile } from "node:fs/promises";
 import {
   Gateway,
@@ -169,6 +170,32 @@ async function main() {
   // attacker can reach, and it must land under the facts, never over them.
   if (onDisk.indexOf(SENTINEL) < onDisk.indexOf(config.agent)) {
     failures.push("the agent-prompt body was placed above the identity the supervisor wrote");
+  }
+
+  // The lookup that actually happens, done the way it actually happens.
+  //
+  // This assertion exists because its absence cost a deployed capsule. The
+  // supervisor prepends /capsule/bin to the child's PATH, which is true and
+  // insufficient: OpenClaw runs model-chosen commands through `sh -lc`, and a
+  // login shell sources /etc/profile and replaces PATH wholesale. Every other
+  // check passed — the broker was up, the skill file was right, the status block
+  // rendered the policy correctly — and the agent still reported the command as
+  // unavailable, because the only PATH that matters is the one a login shell
+  // ends up with.
+  //
+  // `command -v` and not `test -x`: the question is not whether the file exists,
+  // it is whether this exact lookup resolves.
+  const lookup = spawnSync("sh", ["-lc", "command -v capsule-wallet"], { encoding: "utf8" });
+  if (lookup.status !== 0 || lookup.stdout.trim() === "") {
+    failures.push("capsule-wallet does not resolve in a login shell — this is how the gateway runs it");
+  }
+
+  // And it has to actually execute, not merely resolve. An extensionless symlink
+  // to an ESM file is a module-type question Node answers from the realpath, and
+  // getting that wrong is a file that resolves and then refuses to run.
+  const runs = spawnSync("sh", ["-lc", "capsule-wallet --help"], { encoding: "utf8" });
+  if (runs.status !== 0 || !runs.stdout.includes("capsule-wallet")) {
+    failures.push(`capsule-wallet resolves but does not run — ${(runs.stderr || "").split("\n")[0]}`);
   }
 
   // The pack the one `apply` above wrote, because it was given a broker.
