@@ -27,7 +27,7 @@
  * Client-safe. No env, no secrets, no server RPC — the /connect page runs all of
  * this in the browser against the user's own wallet client.
  */
-import { zeroAddress, type Address, type Hex, type PublicClient } from "viem";
+import { hexToBytes, zeroAddress, type Address, type Hex, type PublicClient } from "viem";
 import { namehash, normalize, packetToBytes } from "viem/ens";
 import { toHex } from "viem";
 import {
@@ -380,6 +380,175 @@ export function parentBlocker(status: ParentStatus): string | null {
  */
 export function parentIsReady(status: ParentStatus): boolean {
   return parentBlocker(status) === null;
+}
+
+/* ------------------------------------------------------------------ */
+/* which names does this wallet actually have                          */
+/* ------------------------------------------------------------------ */
+
+/**
+ * A parent this account has a real claim on, and why.
+ *
+ * "Has a claim on" is deliberately not "owns". Owning a name and being able to
+ * host agents under it are different facts — `open` parents accept mints from
+ * anyone — so this describes the two things that actually put a name on
+ * somebody's dashboard: they connected it, or they have minted under it.
+ */
+export type OwnedParent = {
+  name: string;
+  node: Hex;
+  registry: Address;
+  /** Anyone may mint here, versus only this parent's own admins. */
+  open: boolean;
+  /** Capsules this account has minted under it. */
+  minted: number;
+  /** This account is the one that called `connectParent`. */
+  connectedByOwner: boolean;
+};
+
+/**
+ * A DNS wire name back into a readable one.
+ *
+ * `packetToBytes` above goes one way and viem ships no inverse, but the minter
+ * stores `parentDns` at connect time and `parentOf` hands it back, which makes
+ * it the only place a parent's *name* — not its hash — survives on chain. That
+ * is the whole reason the fleet can be routed from chain state instead of from
+ * a cookie: namehash is one-way, so without this the mint events would identify
+ * a parent we could filter on but never name.
+ *
+ * Returns "" on anything malformed rather than throwing. The caller verifies the
+ * result by namehashing it back to the node the contract reported, so a wrong
+ * answer here becomes a dropped parent rather than a wrong dashboard.
+ */
+function decodeDnsName(dns: Hex): string {
+  try {
+    const bytes = hexToBytes(dns);
+    const labels: string[] = [];
+    let i = 0;
+    while (i < bytes.length) {
+      const length = bytes[i];
+      if (length === 0) break;
+      if (i + 1 + length > bytes.length) return "";
+      labels.push(new TextDecoder().decode(bytes.slice(i + 1, i + 1 + length)));
+      i += 1 + length;
+    }
+    return labels.join(".");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Every parent this account can sensibly be shown, read from the chain.
+ *
+ * Exists because `CAPSULE_PARENT_NAME` is a deployment default, not an identity,
+ * and a launchpad that serves one name per deployment is not a launchpad. The
+ * alternative — remembering the last parent in `localStorage` — was rejected on
+ * the grounds that it is per-browser and per-device, and that a project whose
+ * central claim is "the chain is the database" should not route its own
+ * dashboard from a cookie.
+ *
+ * Reverse resolution is not used, and would not work here: a primary name is one
+ * name where a wallet may have several, says nothing about whether the minter is
+ * wired to it, and is unset for almost everyone on a testnet. `ParentConnected`
+ * and `CapsuleMinted` describe what someone has actually *done* with a name,
+ * which is the question a fleet dashboard is asking.
+ *
+ * Three round trips regardless of how many parents exist.
+ */
+export async function readOwnerParents(
+  client: PublicClient,
+  config: { minter: Address; fromBlock: bigint; owner: Address },
+): Promise<OwnedParent[]> {
+  const { minter, fromBlock, owner } = config;
+
+  const [connections, mints] = await Promise.all([
+    client.getContractEvents({
+      address: minter,
+      abi: minterAbi,
+      eventName: "ParentConnected",
+      fromBlock,
+      toBlock: "latest",
+    }),
+    client.getContractEvents({
+      address: minter,
+      abi: minterAbi,
+      eventName: "CapsuleMinted",
+      // `owner` is the third indexed field, so this is a topic filter the RPC
+      // applies. Reading one wallet's names costs the same whether the minter has
+      // served one of them or a thousand.
+      args: { owner },
+      fromBlock,
+      toBlock: "latest",
+    }),
+  ]);
+
+  if (connections.length === 0) return [];
+
+  // Who connected each registry, newest wins — a parent can be disconnected and
+  // reconnected, possibly by a different admin, and the current one is the claim.
+  const connectedBy = new Map<Address, Address>();
+  for (const log of [...connections].sort((a, b) => Number((a.blockNumber ?? 0n) - (b.blockNumber ?? 0n)))) {
+    const registry = log.args.registry as Address | undefined;
+    const by = log.args.by as Address | undefined;
+    if (registry !== undefined && by !== undefined) connectedBy.set(registry, by);
+  }
+
+  // Capsules per parent, counted by distinct label so a name re-minted after
+  // expiry is one agent and not two.
+  const labelsByNode = new Map<Hex, Set<string>>();
+  for (const log of mints) {
+    const node = log.args.parentNode as Hex | undefined;
+    const label = log.args.label as string | undefined;
+    if (node === undefined || label === undefined) continue;
+    const labels = labelsByNode.get(node) ?? new Set<string>();
+    labels.add(label);
+    labelsByNode.set(node, labels);
+  }
+
+  const registries = [...connectedBy.keys()];
+  // `parentOf` rather than replaying `ParentDisconnected`: the contract already
+  // tracks the current state, and a disconnect-then-reconnect sequence
+  // reconstructed from events is a bug waiting to be written.
+  const stored = await client.multicall({
+    contracts: registries.map((registry) => ({
+      address: minter,
+      abi: minterAbi,
+      functionName: "parentOf" as const,
+      args: [registry] as const,
+    })),
+    allowFailure: true,
+  });
+
+  const parents: OwnedParent[] = [];
+  stored.forEach((result, index) => {
+    if (result.status !== "success") return;
+    const [connected, open, , node, dnsName] = result.result as readonly [boolean, boolean, Address, Hex, Hex];
+    if (!connected) return;
+
+    const name = decodeDnsName(dnsName);
+    // The integrity check that makes the decoder safe to trust. If the name we
+    // decoded does not hash to the node the contract reported, we have misread
+    // the wire format, and a parent silently dropped beats one whose dashboard
+    // is addressed by a name that means something else.
+    if (name === "" || namehash(name) !== node) return;
+
+    const registry = registries[index];
+    const minted = labelsByNode.get(node)?.size ?? 0;
+    const connectedByOwner = connectedBy.get(registry)?.toLowerCase() === owner.toLowerCase();
+    if (minted === 0 && !connectedByOwner) return;
+
+    parents.push({ name, node, registry, open, minted, connectedByOwner });
+  });
+
+  // Where this wallet has the most at stake first: agents it minted, then names
+  // it wired up but has not used yet.
+  return parents.sort(
+    (a, b) =>
+      b.minted - a.minted ||
+      Number(b.connectedByOwner) - Number(a.connectedByOwner) ||
+      a.name.localeCompare(b.name),
+  );
 }
 
 /** Re-exported so callers wiring the connect transactions need one import. */

@@ -20,6 +20,14 @@ export default function AgentCard({
   onRecall: (capsule: CapsuleData) => void;
 }) {
   const dead = capsule.status === "recalled";
+  /* A label is only unique within a parent, so the parent has to survive the
+     click. `/fleet/dev` alone means "dev under whatever `CAPSULE_PARENT_NAME`
+     says", which for everyone but the deployment's owner is a name they have
+     never heard of — the drill-down then renders not-found for a capsule that is
+     sitting right there in the list they clicked it from. Always qualified rather
+     than only when it differs from the default: this component cannot see the
+     default, and a link that is right by coincidence is not right. */
+  const href = `/fleet/${capsule.label}?parent=${encodeURIComponent(capsule.parent)}`;
   const telegram = capsule.records.endpointWeb;
   const handle = telegram === "" ? "no bot published" : "@" + telegram.replace(/^https?:\/\/t\.me\//, "");
 
@@ -44,7 +52,7 @@ export default function AgentCard({
             <StatusPill status={capsule.status} />
           </span>
         </div>
-        <Link href={"/fleet/" + capsule.label} className="ensname" style={{ fontSize: 17, display: "block" }}>
+        <Link href={href} className="ensname" style={{ fontSize: 17, display: "block" }}>
           {capsule.label}
           <span className="p">.{capsule.parent}</span>
         </Link>
@@ -79,7 +87,7 @@ export default function AgentCard({
       </div>
 
       <div className="row" style={{ padding: "12px 20px 16px", borderTop: "2px solid var(--line)", gap: 10 }}>
-        <Link href={"/fleet/" + capsule.label} className="btn btn-sm">
+        <Link href={href} className="btn btn-sm">
           Open
         </Link>
         <span className="mono hint push" style={{ fontSize: 11.5 }}>

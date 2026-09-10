@@ -1,5 +1,6 @@
 import FleetView from "@/components/FleetView";
 import FleetError from "@/components/FleetError";
+import FleetRouterMount from "@/components/FleetRouterMount";
 import { loadFleet } from "@/lib/capsule/fleet-server";
 
 /* Rendered per request, not at build time. The RPC read has to happen where the
@@ -24,5 +25,19 @@ export default async function FleetPage({
   const { parent } = await searchParams;
   const result = await loadFleet(parent);
   if (!result.ok) return <FleetError error={result.error} />;
-  return <FleetView fleet={result.fleet} />;
+
+  /* An unqualified /fleet is a question the server cannot answer: the parent
+     worth showing is the visitor's, and the visitor is a wallet that exists only
+     in their browser. So the default fleet renders — immediately, and correctly
+     for a stranger — and `FleetRouter` upgrades it to their own once the address
+     is known. Only when the parent was left off: someone who asked for a
+     specific name gets that name and nothing clever on top. */
+  const asked = parent?.trim() ?? "";
+
+  return (
+    <>
+      {asked === "" && <FleetRouterMount showing={result.fleet.parent} />}
+      <FleetView fleet={result.fleet} />
+    </>
+  );
 }

@@ -36,10 +36,23 @@ async function main() {
     transport: http(env.rpcUrl, { batch: true }),
   });
 
-  // The deployment's default parent. One minter serves every connected name, so
-  // this check is scoped to one of them — the one this deployment is about — and
-  // says so, rather than pretending "the fleet" is still a single thing.
-  const parent = encodeParent(env.defaultParentName);
+  // Which parent to check. One minter serves every connected name, so this is
+  // scoped to one of them and says so, rather than pretending "the fleet" is
+  // still a single thing.
+  //
+  // Takeable as an argument because defaulting to `CAPSULE_PARENT_NAME` is what
+  // made this script useless at the moment it was most needed. Every per-capsule
+  // assertion below lives inside a loop over `fleet.capsules`; point the script
+  // at a parent that has never been minted under and the loop body never runs,
+  // so the checks do not fail — they simply do not happen, and the script reports
+  // two vacuous failures while a real fleet was rendering every capsule as
+  // recalled. A suite that can only inspect one name is one deployment decision
+  // away from inspecting nothing.
+  //
+  //   npm run check:fleet                 # the deployment's default parent
+  //   npm run check:fleet -- berkin.eth   # any parent that has capsules
+  const requested = process.argv[2]?.trim().toLowerCase();
+  const parent = encodeParent(requested !== undefined && requested !== "" ? requested : env.defaultParentName);
   console.log(`minter ${env.minterAddress} from block ${env.minterBlock}`);
   console.log(`parent ${parent.name} · node ${parent.node}\n`);
 
@@ -71,7 +84,18 @@ async function main() {
   });
   console.log(`read ${fleet.capsules.length} capsule(s) at block ${fleet.block} in ${Date.now() - started}ms\n`);
 
-  check("fleet is not empty", fleet.capsules.length > 0, `${fleet.capsules.length} minted`);
+  // Said loudly, because everything below is a loop over `fleet.capsules` and an
+  // empty fleet skips all of it. A run that reports only this failure has checked
+  // nothing about the read path — it has checked that nobody minted here.
+  check(
+    "fleet is not empty",
+    fleet.capsules.length > 0,
+    fleet.capsules.length > 0
+      ? `${fleet.capsules.length} minted`
+      : `0 minted under ${parent.name} — every per-capsule check below was SKIPPED,` +
+        ` not passed. Re-run against a parent that has capsules:` +
+        ` npm run check:fleet -- <name>`,
+  );
 
   for (const capsule of fleet.capsules) {
     console.log(`\n${capsule.name}`);

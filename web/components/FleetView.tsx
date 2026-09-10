@@ -79,7 +79,10 @@ export default function FleetView({ fleet }: { fleet: Fleet }) {
               resolver, the status from the role behind them.
             </p>
           </div>
-          <Link href="/launch" className="btn btn-primary">
+          {/* "Another" means another under this parent — the one named in the
+              heading directly above — so the launch form must open on it rather
+              than on the deployment's default. */}
+          <Link href={`/launch?parent=${encodeURIComponent(fleet.parent)}`} className="btn btn-primary">
             Hire another →
           </Link>
         </div>
