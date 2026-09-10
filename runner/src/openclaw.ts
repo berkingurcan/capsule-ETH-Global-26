@@ -26,10 +26,12 @@
  */
 import { randomBytes } from "node:crypto";
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { CHAIN } from "./chain.js";
 import type { CapsuleConfig } from "./config.js";
+import { composePersona, type CapsuleStatus } from "./persona.js";
 import { envVarFor, isBuiltInProvider } from "./providers.js";
 import type { RuntimeCredentials } from "./runtime.js";
 
@@ -47,6 +49,13 @@ export const WORKSPACE_PATH = join(homedir(), ".openclaw", "workspace");
  * defaults to `"always"`. Measured against 2026.9.3: the gateway writes these
  * files only when they are absent, so one written before the child is spawned
  * survives startup untouched.
+ *
+ * `"always"` is also why the live status lives in this file rather than beside
+ * it. A second file — `CAPSULE.md`, say — would be injected by nothing and read
+ * only if the model remembered to go looking, which is exactly the failure this
+ * whole change exists to fix. Re-injected every turn, this one is current by
+ * construction, so the supervisor rewrites it in place each tick. See
+ * `./persona.ts` for what goes in it and in what order.
  */
 export const PERSONA_PATH = join(WORKSPACE_PATH, "AGENTS.md");
 
@@ -232,6 +241,35 @@ export function buildOpenClawEnv(
 
   env.OPENCLAW_CONFIG_PATH = CONFIG_PATH;
 
+  // Who this agent is, for anything in the gateway that runs a command rather
+  // than reads a file — a tool, a script, a shell. Every one of these values is
+  // already public: three of them are literally text records anybody can
+  // resolve, and the fourth is the address those records point at.
+  //
+  // `AGENT_KEY` is not here and must never be. Note the shape of the guard: the
+  // allowlist above builds this object from nothing rather than filtering
+  // `process.env`, so a new secret in the supervisor's environment is excluded
+  // by default instead of needing to be remembered. Adding public facts does not
+  // weaken that — it just means the child now knows its own name, which is the
+  // difference between an agent that can answer "who are you" and one that
+  // truthfully reports it has no idea.
+  env.CAPSULE_NAME = config.name;
+  env.CAPSULE_AGENT_ADDRESS = config.agent;
+  env.CAPSULE_NODE = config.node;
+  env.CAPSULE_RESOLVER = config.resolver;
+  env.CAPSULE_CHAIN_ID = String(CHAIN.id);
+
+  // Opt-in, and deliberately not `SEPOLIA_RPC_URL`.
+  //
+  // The supervisor's RPC URL usually carries a provider key in its path, which
+  // makes it a credential wearing a URL's clothes — handing it to a process that
+  // executes model-chosen tools would undo the paragraph above. So the operator
+  // names a separate endpoint they are willing to have the agent spend, and
+  // absent one the agent reads its balance out of its own status block instead
+  // of from a node.
+  const agentRpc = process.env.CAPSULE_AGENT_RPC_URL?.trim();
+  if (agentRpc !== undefined && agentRpc !== "") env.CAPSULE_RPC_URL = agentRpc;
+
   // Without this the gateway refuses to start at all. Measured against 2026.9.3:
   // it detects a container, defaults to bind=auto, and exits with "Refusing to
   // bind gateway to auto without auth" — instantly, every time.
@@ -257,19 +295,28 @@ export function buildOpenClawEnv(
 }
 
 /**
- * Write the persona the name published.
+ * Write the workspace file the model reads every turn.
  *
- * This is the whole of `agent-prompt` arriving somewhere the model will read it.
- * Before this existed the body was fetched, measured, logged as a digest and
- * dropped, so every capsule in the fleet booted as the same default assistant
- * no matter what its name said.
+ * Takes the composed document — identity, status and the `agent-prompt` body —
+ * not the prompt alone. Before any of this existed the body was fetched,
+ * measured, logged as a digest and dropped, so every capsule in the fleet booted
+ * as the same default assistant no matter what its name said.
  *
- * Owner-only, like the config: the prompt is not a secret the way an API key is,
- * but it is the one the owner paid a transaction to point at.
+ * Owner-only, like the config: none of it is a secret the way an API key is, but
+ * nothing else in the image has any business reading it.
+ *
+ * Written through a temporary file and renamed, because the tick loop rewrites
+ * this while the gateway is running and `rename(2)` within a directory is
+ * atomic. A plain overwrite has a window in which the file on disk is half the
+ * old document and half the new one, and the reader in that window is a language
+ * model being told who it is.
  */
-export async function writePersona(body: string, path = PERSONA_PATH): Promise<void> {
+export async function writePersona(document: string, path = PERSONA_PATH): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
-  await writeFile(path, body.endsWith("\n") ? body : `${body}\n`, { mode: 0o600 });
+  const body = document.endsWith("\n") ? document : `${document}\n`;
+  const temporary = `${path}.${process.pid}.tmp`;
+  await writeFile(temporary, body, { mode: 0o600 });
+  await rename(temporary, path);
 }
 
 /**
@@ -334,6 +381,26 @@ export class Gateway {
   #failures = 0;
   readonly #log: GatewayLogger;
 
+  // What the workspace file is built from. Held here because the two halves
+  // arrive on completely different cadences — the config and the prompt body on
+  // an apply, the status on every tick — and either one alone cannot rebuild
+  // the document. Before this, the supervisor knew all of it and told the model
+  // none of it.
+  #config: CapsuleConfig | undefined;
+  #body = "";
+  #status: CapsuleStatus | undefined;
+
+  /**
+   * The document as last written, so an identical render is not rewritten.
+   *
+   * The `As of` stamp advances every tick, so in steady state this does not fire
+   * — the file genuinely is different each time and a few kilobytes every
+   * TICK_SECONDS is not worth optimising away. What it does catch is the double
+   * render at boot, where `apply` composes the file immediately after
+   * `updateStatus` stored the status that goes in it.
+   */
+  #written: string | undefined;
+
   constructor(log: GatewayLogger) {
     this.#log = log;
   }
@@ -374,12 +441,50 @@ export class Gateway {
     // Before the spawn, always. The gateway reads this file at startup and
     // creates its own if it is missing, and an agent that boots once with a
     // generated persona has already introduced itself as somebody else.
-    await writePersona(persona);
+    this.#config = config;
+    this.#body = persona;
+    await this.#writeWorkspace();
 
     if (this.running) await this.stop();
     this.#stopping = false;
     this.#failures = 0;
     this.#spawn();
+  }
+
+  /**
+   * Refresh the live half of the workspace file. Never restarts the child.
+   *
+   * Called every tick, including the ticks where nothing happened — an agent
+   * asked "are you still authorized" ten minutes into a silence should not be
+   * answering from what was true at boot.
+   *
+   * Swallows its own failures on purpose, and says so once. A workspace file
+   * that could not be rewritten is a stale self-description; it is not a reason
+   * to stop proving to the chain that this agent is still authorized, and the
+   * tick loop has exactly one fatal condition.
+   */
+  async updateStatus(status: CapsuleStatus): Promise<void> {
+    this.#status = status;
+    if (this.#config === undefined) return;
+    try {
+      await this.#writeWorkspace();
+    } catch (error) {
+      this.#log.warn(
+        `could not refresh the workspace identity file — ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  async #writeWorkspace(): Promise<void> {
+    if (this.#config === undefined) return;
+    const document = composePersona({
+      config: this.#config,
+      body: this.#body,
+      status: this.#status,
+    });
+    if (document === this.#written) return;
+    await writePersona(document);
+    this.#written = document;
   }
 
   #spawn(): void {

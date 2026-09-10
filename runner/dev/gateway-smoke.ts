@@ -33,7 +33,7 @@
  * only starts when the internet is perfect is one that stops on a bad minute.
  */
 import { readFile } from "node:fs/promises";
-import { Gateway, PERSONA_PATH, buildOpenClawConfig } from "../src/openclaw.js";
+import { Gateway, PERSONA_PATH, buildOpenClawConfig, buildOpenClawEnv } from "../src/openclaw.js";
 import { Secret } from "../src/secret.js";
 import type { CapsuleConfig } from "../src/config.js";
 import type { RuntimeCredentials } from "../src/runtime.js";
@@ -88,6 +88,24 @@ async function main() {
     failures.push("telegram was not configured — the capsule would have no surface");
   }
 
+  // The child's environment now carries public facts about the capsule, and the
+  // whole value of that depends on the one thing it must never carry travelling
+  // beside them. Asserted rather than reviewed, because the failure is silent:
+  // a gateway handed AGENT_KEY works perfectly and hands an agent's signing key
+  // to whatever tool the model decides to run.
+  const childEnv = buildOpenClawEnv(config, credentials);
+  if ("AGENT_KEY" in childEnv) {
+    failures.push("AGENT_KEY reached the gateway environment");
+  }
+  for (const [name, value] of Object.entries(childEnv)) {
+    if (/^0x[0-9a-fA-F]{64}$/.test(value)) {
+      failures.push(`${name} looks like a 32-byte private key`);
+    }
+  }
+  if (childEnv.CAPSULE_NAME !== config.name || childEnv.CAPSULE_AGENT_ADDRESS !== config.agent) {
+    failures.push("the gateway environment does not say which capsule it is");
+  }
+
   const gateway = new Gateway({
     info: (message) => console.log(`   ${message}`),
     warn: (message) => console.warn(`⚠️  ${message}`),
@@ -98,6 +116,46 @@ async function main() {
   const onDisk = await readFile(PERSONA_PATH, "utf8");
   if (!onDisk.includes(SENTINEL)) {
     failures.push("the persona the supervisor wrote is not the one on disk");
+  }
+
+  // The bug this file grew a section for: a capsule that boots knowing its name
+  // and its address, and tells the model neither, then answers its owner that it
+  // has no wallet and was never provisioned. Both facts are on chain, both were
+  // in the supervisor's own boot log, and neither reached the one process whose
+  // job is to answer the question.
+  for (const fact of [config.name, config.agent, config.model, config.promptRef]) {
+    if (!onDisk.includes(fact)) failures.push(`the persona does not tell the agent its ${fact}`);
+  }
+  // Order is the security property: the owner-supplied body is the only part an
+  // attacker can reach, and it must land under the facts, never over them.
+  if (onDisk.indexOf(SENTINEL) < onDisk.indexOf(config.agent)) {
+    failures.push("the agent-prompt body was placed above the identity the supervisor wrote");
+  }
+
+  // A status refresh must reach the file without restarting the child — it runs
+  // every tick, and a gateway that restarted on each one would never answer a
+  // message.
+  const startsBefore = gateway.starts;
+  await gateway.updateStatus({
+    authorized: true,
+    ticks: 41,
+    beats: 2,
+    balance: "0.004210 ETH · ~63 beats at 1.04 gwei",
+    lowBalance: false,
+    heartbeat: "beat-2",
+    heartbeatSeconds: 28_800,
+    gatewayFailing: false,
+    checkedAt: new Date(),
+  });
+  const refreshed = await readFile(PERSONA_PATH, "utf8");
+  if (!refreshed.includes("0.004210 ETH")) {
+    failures.push("a status refresh did not reach the file the model reads");
+  }
+  if (!refreshed.includes(SENTINEL)) {
+    failures.push("a status refresh dropped the persona");
+  }
+  if (gateway.starts !== startsBefore) {
+    failures.push("a status refresh restarted the gateway");
   }
 
   await new Promise((resolve) => setTimeout(resolve, SETTLE_MS));
@@ -114,7 +172,9 @@ async function main() {
     for (const failure of failures) console.error(`❌ ${failure}`);
     process.exit(1);
   }
-  console.log(`✅ gateway up, persona in place, no credential on disk · ${gateway.starts} start`);
+  console.log(
+    `✅ gateway up, identity and persona in place, status refreshable, no credential on disk or in the child env · ${gateway.starts} start`,
+  );
 }
 
 main().catch((error) => {
