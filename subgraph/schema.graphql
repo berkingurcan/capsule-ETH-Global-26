@@ -1,0 +1,272 @@
+####################################################################
+# The Capsule fleet, as one index.
+#
+# Three event sources that no single contract emits together:
+#
+#   CapsuleMinter.CapsuleMinted      which names exist, and who owns them
+#   PermissionedResolver.TextChanged what each name currently says
+#   PermissionedResolver.EACRolesChanged whether the agent may still write
+#
+# `web/lib/capsule/fleet.ts` reads all three over `eth_getLogs` and joins
+# them in memory on every page render. Everything below is that join, done
+# once at index time — which is what makes a question like "did anything
+# stop heartbeating before it was recalled?" a field rather than a program.
+#
+# Bytes ids throughout (nodes, tx hashes, addresses) per The Graph's
+# performance guidance; the one String id is `ResourceRef`, where the key
+# is a uint256 and a decimal string is the only lossless spelling both the
+# handler and the event can agree on.
+####################################################################
+
+
+"""
+An ENS name that has connected itself to `CapsuleMinter` and may issue
+capsules. Keyed by its own `PermissionedRegistry`, which is the handle the
+minter stores it against — `connectParent` proves the registry and the name
+point at each other before writing anything.
+"""
+type Parent @entity(immutable: false) {
+  "The parent's PermissionedRegistry address."
+  id: Bytes!
+  "namehash of the parent name."
+  node: Bytes!
+  "e.g. `capsulefleet.eth`. Decoded from the DNS wire name the minter stores."
+  name: String!
+  "DNS wire format, including the root byte."
+  dnsName: Bytes!
+  "The PermissionedResolver capsule records under this name are written to."
+  resolver: Bytes!
+  "Whether anybody may mint here, or only this registry's admins."
+  open: Boolean!
+  "False after `disconnectParent`. Capsules already minted are untouched."
+  connected: Boolean!
+  "The admin who last called connectParent/setParentOpen."
+  connectedBy: Bytes!
+  connectedAt: BigInt!
+  connectedAtBlock: BigInt!
+  capsuleCount: Int!
+  capsules: [Capsule!]! @derivedFrom(field: "parent")
+}
+
+"""
+parentNode -> Parent. `CapsuleMinted` carries the parent's namehash but not
+its registry, so the mint handler needs this to find the parent it belongs to.
+"""
+type ParentByNode @entity(immutable: false) {
+  "The parent's namehash."
+  id: Bytes!
+  parent: Parent!
+}
+
+"""
+One AI agent: one ENS subname, its records, its permission, its heartbeat.
+"""
+type Capsule @entity(immutable: false) {
+  "namehash of the capsule name."
+  id: Bytes!
+  parent: Parent!
+  "e.g. `analyst`."
+  label: String!
+  "e.g. `analyst.capsulefleet.eth`."
+  name: String!
+  tokenId: BigInt!
+  "Current per `CapsuleMinted`. A transfer after the mint is not indexed."
+  owner: Bytes!
+  "The agent's own EOA — the least privileged key in the system."
+  agent: Bytes!
+  "The name's `addr` record. Equals `agent` unless the owner has rewritten it."
+  addr: Bytes!
+  expiry: BigInt!
+  resolver: Bytes!
+
+  mintedAt: BigInt!
+  mintedAtBlock: BigInt!
+  mintTx: Bytes!
+
+  # ---- current record values (ENSIP-25/26/27) --------------------------
+  "ENSIP-27 `class`. Always `Agent` for a capsule."
+  nodeClass: String!
+  "ENSIP-27 `schema` — the JSON Schema for the keys no ENSIP defines."
+  schemaUri: String!
+  "ENSIP-26 `agent-context`."
+  context: String!
+  "ENSIP-26 `agent-endpoint[web]` — the Telegram bot."
+  endpointWeb: String!
+  "ENSIP-26 syntax, our protocol tag: `agent-endpoint[capsule]`."
+  endpointCapsule: String!
+  "`agent-model`, e.g. `anthropic/claude-opus-5`."
+  model: String!
+  "`agent-runtime`, e.g. `openclaw`."
+  runtime: String!
+  "`agent-prompt` — a pointer such as `cap_8f3d1a`, never the prompt body."
+  prompt: String!
+  "`agent-heartbeat` — the only key the agent's own key may write."
+  heartbeat: String!
+  "ENSIP-25 `agent-registration[<registry>][<agentId>]`."
+  registrationKey: String!
+  registrationValue: String!
+
+  # ---- permission ------------------------------------------------------
+  """
+  EAC resource guarding `agent-heartbeat` on this name:
+  `uint256(keccak256(abi.encode(node, keccak256("agent-heartbeat"))))`,
+  as a decimal string.
+  """
+  heartbeatResource: String!
+  "The name-level resource, `resource(node, 0)` — what the owner's admin roles sit on."
+  nameResource: String!
+  "Whether the agent currently holds ROLE_SET_TEXT on its heartbeat key."
+  authorized: Boolean!
+  "The kill switch, pulled. Null while the agent is still authorized."
+  recalledAt: BigInt
+  recalledAtBlock: BigInt
+  recalledTx: Bytes
+  "How many times this capsule's heartbeat role has been revoked."
+  recallCount: Int!
+
+  # ---- heartbeat -------------------------------------------------------
+  beatCount: Int!
+  firstBeatAt: BigInt
+  lastBeatAt: BigInt
+  lastBeatValue: String!
+  lastBeatSequence: BigInt!
+  lastBeatTx: Bytes
+  """
+  Seconds between the two most recent beats. Null before the second beat.
+  A cadence is not readable from the chain — `HEARTBEAT_SECONDS` lives in the
+  runner's environment — so it is only ever observed.
+  """
+  lastInterval: BigInt
+
+  # ---- config churn ----------------------------------------------------
+  "Record writes that were not heartbeats. The owner changing the agent's mind."
+  configWriteCount: Int!
+  lastConfigChangeAt: BigInt
+  "How many record writes came from an address other than this capsule's agent."
+  ownerWriteCount: Int!
+
+  writes: [RecordWrite!]! @derivedFrom(field: "capsule")
+  heartbeats: [Heartbeat!]! @derivedFrom(field: "capsule")
+  roleChanges: [RoleChange!]! @derivedFrom(field: "capsule")
+}
+
+"""
+One `setText` on a capsule name.
+
+`writer` is what the chain-scanning read path cannot cheaply produce: the
+address that actually sent the transaction. Without it "who authorised this
+config change?" can only be inferred from which key changed.
+"""
+type RecordWrite @entity(immutable: true) {
+  "tx hash ++ log index."
+  id: Bytes!
+  capsule: Capsule!
+  key: String!
+  value: String!
+  "`event.transaction.from` — who signed the write."
+  writer: Bytes!
+  "True when `writer` is the capsule's own agent key."
+  byAgent: Boolean!
+  "True for `agent-heartbeat`, the one key the agent is permitted to write."
+  isHeartbeat: Boolean!
+  block: BigInt!
+  timestamp: BigInt!
+  tx: Bytes!
+  logIndex: BigInt!
+}
+
+"""
+One heartbeat write, with the gap that preceded it already measured.
+"""
+type Heartbeat @entity(immutable: true) {
+  id: Bytes!
+  capsule: Capsule!
+  "`beat-9` -> 9. Monotonic, never a timestamp."
+  sequence: BigInt!
+  value: String!
+  "Seconds since the previous beat on this capsule. Null for the first."
+  interval: BigInt
+  block: BigInt!
+  timestamp: BigInt!
+  tx: Bytes!
+}
+
+"""
+One EAC role change on a capsule's heartbeat key or on the name itself.
+
+`secondsSinceLastBeat` is the join this whole subgraph exists for. It pairs a
+revocation from `PermissionedResolver` with the last write from the agent's
+own key — two events, two cadences, no contract that emits both — so
+"did anything stop heartbeating before it was recalled?" is a comparison
+against `lastInterval`, not a reconciliation job.
+"""
+type RoleChange @entity(immutable: true) {
+  id: Bytes!
+  capsule: Capsule!
+  "`agent-heartbeat` when the change was on the heartbeat key, `name` for the name-level resource."
+  resourceKind: String!
+  "The account whose roles changed."
+  account: Bytes!
+  "Who signed the change — the owner, for a recall."
+  changedBy: Bytes!
+  oldRoleBitmap: BigInt!
+  newRoleBitmap: BigInt!
+  "Gained ROLE_SET_TEXT."
+  granted: Boolean!
+  "Lost ROLE_SET_TEXT. On the heartbeat resource, this is the kill switch."
+  revoked: Boolean!
+  "True when the account is the capsule's own agent."
+  isAgent: Boolean!
+  "Seconds between this capsule's last heartbeat and this change. Null if it never beat."
+  secondsSinceLastBeat: BigInt
+  "How many beats the capsule had written when this landed."
+  beatsAtChange: Int!
+  block: BigInt!
+  timestamp: BigInt!
+  tx: Bytes!
+}
+
+"""
+Internal: EAC resource id -> the capsule and key it guards.
+
+`EACRolesChanged` carries a hashed resource and nothing else, so without this
+a role change cannot be attributed to a name. Written at mint for both
+resources a capsule has.
+"""
+type ResourceRef @entity(immutable: true) {
+  "The uint256 resource, as a decimal string."
+  id: String!
+  capsule: Capsule!
+  "`agent-heartbeat` or `name`."
+  kind: String!
+}
+
+"""
+Internal: guards `PermissionedResolver` template creation.
+
+One resolver may serve several parents, and `ParentConnected` is re-emitted
+on every `setParentOpen`. Creating the data source twice would index every
+resolver event twice.
+"""
+type ResolverSource @entity(immutable: true) {
+  "The resolver address."
+  id: Bytes!
+  createdAtBlock: BigInt!
+}
+
+"""
+Fleet-wide totals, keyed by the minter. One row.
+"""
+type Fleet @entity(immutable: false) {
+  "The CapsuleMinter address."
+  id: Bytes!
+  parentCount: Int!
+  capsuleCount: Int!
+  "Capsules whose agent still holds its heartbeat role."
+  authorizedCount: Int!
+  beatCount: Int!
+  recallCount: Int!
+  recordWriteCount: Int!
+  lastEventAt: BigInt!
+  lastEventBlock: BigInt!
+}

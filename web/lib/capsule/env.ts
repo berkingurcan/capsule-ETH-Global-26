@@ -271,3 +271,110 @@ export function loadProvisionerEnv(): ProvisionerEnv {
 
   return { funderKey, funderAddress, agentFundingWei, machineMemoryMb, tickSeconds, heartbeatSeconds };
 }
+
+////////////////////////////////////////////////////////////////////////////
+// The analyst
+////////////////////////////////////////////////////////////////////////////
+
+/**
+ * How the analyst reaches the subgraph.
+ *
+ * `"mcp"`    The Graph's hosted Subgraph MCP server. The subgraph is published
+ *            to the decentralized network and the gateway serves it by id.
+ * `"direct"` Two local function tools against the Studio query URL. What you
+ *            get before publishing.
+ *
+ * The mode is inferred, not configured, because it is a fact about the
+ * subgraph rather than a preference: the gateway either serves the id or it
+ * does not, and a knob would only let the two disagree.
+ */
+export type AnalystMode = "mcp" | "direct";
+
+/**
+ * What `POST /api/analyst` needs, and nothing else needs.
+ *
+ * Kept out of `ServerEnv` for the same reason the funder key is: `loadServerEnv()`
+ * runs on every page render, and a deployment that never opens /analyst should
+ * not fail to draw a dashboard for want of an API key.
+ */
+export type AnalystEnv = {
+  /**
+   * The app's OWN key, for the analyst route — not an agent's.
+   *
+   * Worth stating because `providers.ts` also names `OPENAI_API_KEY`: that one
+   * is the variable an agent's *container* receives, and its value comes out of
+   * the encrypted `capsule_secret` store per owner. This one is read from this
+   * deployment's environment and is spent by `/api/analyst` alone. Same name,
+   * two different keys, two different blast radii.
+   */
+  openaiApiKey: string;
+  mode: AnalystMode;
+  /** `"mcp"` only. The network subgraph id the gateway serves. */
+  subgraphId?: string;
+  /** `"mcp"` only. A Graph gateway API key. Never reaches the browser. */
+  graphApiKey?: string;
+  /** `"direct"` only. The Studio query URL the function tools POST to. */
+  subgraphUrl?: string;
+};
+
+/**
+ * A network subgraph id, as opposed to a deployment id or an IPFS hash.
+ *
+ * The distinction is the entire reason the analyst failed on first run, so it
+ * is worth being explicit about the three identifiers Studio hands you and
+ * which door each opens:
+ *
+ *   Qm…       an IPFS hash — the *deployment*. Exists as soon as you
+ *             `graph deploy`. The gateway does not serve it.
+ *   0x…       a deployment id. Served only once published.
+ *   base58    the *subgraph* id, minted when you publish to the network. This
+ *             is what `execute_query_by_subgraph_id` takes.
+ *
+ * Anything that is not the third is treated as unpublished, which is the safe
+ * direction to be wrong in: the direct path works either way, and the MCP path
+ * fails with "subgraph not found" several seconds into a stream.
+ */
+function isNetworkSubgraphId(id: string): boolean {
+  if (id.startsWith("Qm") || id.startsWith("0x")) return false;
+  return /^[1-9A-HJ-NP-Za-km-z]{40,60}$/.test(id);
+}
+
+export function loadAnalystEnv(): AnalystEnv {
+  const openaiApiKey = requireEnv("OPENAI_API_KEY");
+
+  const subgraphId = optionalEnv("SUBGRAPH_ID");
+  const graphApiKey = optionalEnv("GRAPH_API_KEY");
+  const subgraphUrl = optionalEnv("SUBGRAPH_URL");
+
+  if (subgraphId !== undefined && (subgraphId.includes("/") || subgraphId.includes(":"))) {
+    throw new InvalidEnvError(
+      "SUBGRAPH_ID",
+      "looks like a URL — it is the subgraph's id, not its query endpoint (the URL goes in SUBGRAPH_URL)",
+    );
+  }
+
+  // Published and keyed: the good path.
+  if (subgraphId !== undefined && isNetworkSubgraphId(subgraphId) && graphApiKey !== undefined) {
+    return { openaiApiKey, mode: "mcp", subgraphId, graphApiKey };
+  }
+
+  // Not published, or no gateway key. Query Studio directly.
+  if (subgraphUrl !== undefined) {
+    return { openaiApiKey, mode: "direct", subgraphUrl };
+  }
+
+  // Neither door is open. Say which one is closer to being open, because the
+  // two fixes are very different amounts of work.
+  if (subgraphId !== undefined && !isNetworkSubgraphId(subgraphId)) {
+    throw new InvalidEnvError(
+      "SUBGRAPH_ID",
+      `is "${subgraphId}", which is a deployment id rather than a network subgraph id — ` +
+        "the gateway only serves published subgraphs. Either publish the subgraph and use the id " +
+        "that produces, or set SUBGRAPH_URL to the Studio query endpoint and the analyst will use that",
+    );
+  }
+  if (subgraphId !== undefined && graphApiKey === undefined) {
+    throw new MissingEnvError("GRAPH_API_KEY");
+  }
+  throw new MissingEnvError("SUBGRAPH_URL");
+}

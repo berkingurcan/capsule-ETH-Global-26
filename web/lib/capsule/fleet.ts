@@ -134,6 +134,35 @@ export type Fleet = {
   /** Block the read was taken at, so the UI can say how fresh it is. */
   block: bigint;
   readAt: number;
+  /**
+   * Which read path produced this.
+   *
+   * Not decoration. `"chain"` is a live scan of `eth_getLogs` at the head;
+   * `"subgraph"` is an index that may be some blocks behind it. A dashboard
+   * whose whole subject is liveness has no business hiding which one it is
+   * showing you, and `lagBlocks` is how far behind the index was when it
+   * answered — null when the head was unknown, 0 when it was caught up.
+   */
+  source: "chain" | "subgraph";
+  lagBlocks: number | null;
+};
+
+/**
+ * A role change, as much of one as the activity feed needs.
+ *
+ * Deliberately pre-resolved to a capsule `name`: the chain reader knows it
+ * from the resource it filtered on, the subgraph reader is told it by the
+ * index, and neither should have to hand this function a resource table to
+ * look it up from.
+ */
+export type RoleChangeRow = {
+  name: string;
+  account: Address;
+  oldRoleBitmap: bigint;
+  newRoleBitmap: bigint;
+  block: bigint;
+  at: number | null;
+  tx: Hex;
 };
 
 export type FleetConfig = {
@@ -183,7 +212,7 @@ function hasRolesCall(resolver: Address, resource: bigint, account: Address) {
   } as const;
 }
 
-function median(values: number[]): number | null {
+export function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
   const mid = Math.floor(sorted.length / 2);
@@ -204,7 +233,11 @@ function median(values: number[]): number | null {
  */
 const UNKNOWN_CADENCE_GRACE = 600;
 
-function deriveStatus(authorized: boolean, quietFor: number | null, cadence: number | null): CapsuleStatus {
+export function deriveStatus(
+  authorized: boolean,
+  quietFor: number | null,
+  cadence: number | null,
+): CapsuleStatus {
   if (!authorized) return "recalled";
   if (quietFor === null) return "never-booted";
   const limit = cadence === null ? UNKNOWN_CADENCE_GRACE : Math.max(cadence * 3, 90);
@@ -352,7 +385,16 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
   ]);
 
   if (minted.length === 0) {
-    return { parent: parentName, minter, capsules: [], events: [], block: head, readAt: Math.floor(Date.now() / 1000) };
+    return {
+      parent: parentName,
+      minter,
+      capsules: [],
+      events: [],
+      block: head,
+      readAt: Math.floor(Date.now() / 1000),
+      source: "chain",
+      lagBlocks: 0,
+    };
   }
 
   // Newest mint per label wins. A label can only be minted once while it is
@@ -534,13 +576,42 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
     };
   });
 
+  // Every heartbeat-resource role change, resolved to the name it belongs to.
+  // `getContractEvents` was already filtered to these resources, so the lookup
+  // cannot miss — but an unmatched row must still not be attributed to a name
+  // it did not happen on.
+  const nameOfResource = new Map(heartbeatResources.map((resource, index) => [resource, names[index].name]));
+  const roleChanges: RoleChangeRow[] = [];
+  for (const log of roleLogs) {
+    const args = log.args as {
+      resource?: bigint;
+      account?: Address;
+      oldRoleBitmap?: bigint;
+      newRoleBitmap?: bigint;
+    };
+    if (args.resource === undefined || args.oldRoleBitmap === undefined || args.newRoleBitmap === undefined) continue;
+    const name = nameOfResource.get(args.resource);
+    if (name === undefined) continue;
+    roleChanges.push({
+      name,
+      account: args.account ?? zeroAddress,
+      oldRoleBitmap: args.oldRoleBitmap,
+      newRoleBitmap: args.newRoleBitmap,
+      block: log.blockNumber ?? 0n,
+      at: times.get(log.blockNumber ?? 0n) ?? null,
+      tx: log.transactionHash ?? ("0x" as Hex),
+    });
+  }
+
   return {
     parent: parentName,
     minter,
     capsules,
-    events: buildEvents(capsules, roleLogs, times, heartbeatResources, names),
+    events: buildEvents(capsules, roleChanges),
     block: head,
     readAt: Math.floor(Date.now() / 1000),
+    source: "chain",
+    lagBlocks: 0,
   };
 }
 
@@ -561,14 +632,13 @@ export async function readCapsule(
  * individually. A capsule beating every 60 seconds would otherwise bury every
  * other event in the fleet within an hour, and the interesting row — a prompt
  * changed, a role pulled — is the one that gets pushed off the screen.
+ *
+ * Role changes arrive as `RoleChangeRow`, which is neither a viem log nor a
+ * subgraph row but the handful of fields both can produce. The two read paths
+ * must not each grow their own idea of what counts as a recall: the rule is
+ * `ROLE_SET_TEXT` crossing zero, it is subtle, and it belongs in one place.
  */
-function buildEvents(
-  capsules: Capsule[],
-  roleLogs: readonly { args: unknown; blockNumber: bigint | null; transactionHash: Hex | null }[],
-  times: Map<bigint, number>,
-  heartbeatResources: bigint[],
-  names: { name: string }[],
-): FleetEvent[] {
+export function buildEvents(capsules: Capsule[], roleChanges: RoleChangeRow[]): FleetEvent[] {
   const events: FleetEvent[] = [];
 
   for (const capsule of capsules) {
@@ -612,24 +682,21 @@ function buildEvents(
     }
   }
 
-  const nameOfResource = new Map(heartbeatResources.map((resource, index) => [resource, names[index].name]));
-  for (const log of roleLogs) {
-    const args = log.args as { resource?: bigint; account?: Address; oldRoleBitmap?: bigint; newRoleBitmap?: bigint };
-    if (args.resource === undefined || args.oldRoleBitmap === undefined || args.newRoleBitmap === undefined) continue;
-    const had = (args.oldRoleBitmap & ROLE_SET_TEXT) !== 0n;
-    const has = (args.newRoleBitmap & ROLE_SET_TEXT) !== 0n;
+  for (const change of roleChanges) {
+    const had = (change.oldRoleBitmap & ROLE_SET_TEXT) !== 0n;
+    const has = (change.newRoleBitmap & ROLE_SET_TEXT) !== 0n;
     if (had === has) continue;
     events.push({
-      id: `role-${log.transactionHash}-${args.account}-${args.newRoleBitmap}`,
+      id: `role-${change.tx}-${change.account}-${change.newRoleBitmap}`,
       kind: has ? "granted" : "recalled",
-      name: nameOfResource.get(args.resource) ?? "unknown",
+      name: change.name,
       text: has ? "Heartbeat role granted" : "Recalled",
       detail: has
         ? `authorizeTextRoles(${RECORD_KEYS.heartbeat}, true)`
         : `authorizeTextRoles(${RECORD_KEYS.heartbeat}, false)`,
-      block: log.blockNumber ?? 0n,
-      at: times.get(log.blockNumber ?? 0n) ?? null,
-      tx: log.transactionHash ?? ("0x" as Hex),
+      block: change.block,
+      at: change.at,
+      tx: change.tx,
     });
   }
 

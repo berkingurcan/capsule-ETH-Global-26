@@ -1,10 +1,11 @@
 /**
  * Drift guard for the record keys.
  *
- * Three copies of the same strings exist and they cannot import each other:
- * Solidity is a different language, and the runner ships as an independent
- * container with its own npm resolution. So they are duplicated, and this
- * asserts they still agree.
+ * Four copies of the same strings exist and they cannot import each other:
+ * Solidity is a different language, the runner ships as an independent
+ * container with its own npm resolution, and the subgraph mapping is
+ * AssemblyScript compiled to WASM. So they are duplicated, and this asserts
+ * they still agree.
  *
  * Why it earns its keep: a mismatch between the key that was authorized and the
  * key that gets written does not fail loudly. `PermissionedResolver` reverts
@@ -46,6 +47,7 @@ const runnerCopy = resolve(here, "../../runner/src/records.ts");
 const webProviders = resolve(here, "../lib/capsule/providers.ts");
 const runnerProviders = resolve(here, "../../runner/src/providers.ts");
 const minterSource = resolve(here, "../../contracts/src/CapsuleMinter.sol");
+const subgraphCopy = resolve(here, "../../subgraph/src/records.ts");
 
 type Check = { name: string; ok: boolean; detail: string; pending?: boolean };
 const checks: Check[] = [];
@@ -105,6 +107,77 @@ const assertIdentical = (label: string, webPath: string, runnerPath: string) => 
 
 assertIdentical("records.ts", webCopy, runnerCopy);
 assertIdentical("providers.ts", webProviders, runnerProviders);
+
+// ---------------------------------------------------------------------------
+// 1b. The subgraph's copy agrees, key for key.
+//
+// Not byte-identical, and it cannot be: `subgraph/src/records.ts` is
+// AssemblyScript, imports graph-ts, and carries derivations the other copies
+// do not have. So the strings are compared one at a time.
+//
+// This is the copy where drift is least visible. The other three fail at
+// runtime — an agent halts, a mint reverts. A subgraph with a stale key still
+// indexes, still serves, and simply attributes nothing: every recall silently
+// missing, every fleet rendering as though no role was ever pulled. It looks
+// like a quiet week.
+//
+// Skipped rather than failed when the subgraph is absent, so a checkout that
+// only wants the web app still passes.
+// ---------------------------------------------------------------------------
+if (!existsSync(subgraphCopy)) {
+  checks.push({ name: "subgraph records.ts", ok: true, detail: "", pending: true });
+} else {
+  const subgraphText = readFileSync(subgraphCopy, "utf8");
+
+  /** AssemblyScript constant -> the property in RECORD_KEYS it must equal. */
+  const SUBGRAPH_KEYS: Record<string, RecordKeyName> = {
+    KEY_CLASS: "class",
+    KEY_SCHEMA: "schema",
+    KEY_CONTEXT: "context",
+    KEY_ENDPOINT_WEB: "endpointWeb",
+    KEY_ENDPOINT_CAPSULE: "endpointCapsule",
+    KEY_MODEL: "model",
+    KEY_RUNTIME: "runtime",
+    KEY_PROMPT: "prompt",
+    KEY_HEARTBEAT: "heartbeat",
+  };
+
+  for (const [constant, property] of Object.entries(SUBGRAPH_KEYS)) {
+    const match = new RegExp(`export const ${constant} = "([^"]*)";`).exec(subgraphText);
+    if (match === null) {
+      expect(`subgraph ${constant}`, false, "not found in subgraph/src/records.ts — did it get renamed?");
+      continue;
+    }
+    expect(
+      `subgraph ${constant}`,
+      match[1] === RECORD_KEYS[property],
+      `subgraph "${match[1]}" vs ts RECORD_KEYS.${property} "${RECORD_KEYS[property]}"`,
+    );
+  }
+
+  // ROLE_SET_TEXT is `1 << 4` in the resolver, and the subgraph decides what
+  // counts as a recall by masking against it. A wrong constant here reads
+  // every role change as uninteresting and drops it.
+  const roleMatch = /export const ROLE_SET_TEXT = BigInt\.fromI32\((\d+)\);/.exec(subgraphText);
+  expect(
+    "subgraph ROLE_SET_TEXT",
+    roleMatch !== null && Number(roleMatch[1]) === 16,
+    roleMatch === null ? "not found in subgraph/src/records.ts" : `subgraph ${roleMatch[1]} vs resolver 1 << 4 = 16`,
+  );
+
+  // The one key not in the table above, because it is a prefix rather than a
+  // key: ENSIP-25's `agent-registration[<registry>][<agentId>]` is only
+  // knowable per capsule, so the mapping matches its opening.
+  const prefixMatch = /export const KEY_REGISTRATION_PREFIX = "([^"]*)";/.exec(subgraphText);
+  const expectedPrefix = registrationKey("", "").split("[")[0] + "[";
+  expect(
+    "subgraph KEY_REGISTRATION_PREFIX",
+    prefixMatch !== null && prefixMatch[1] === expectedPrefix,
+    prefixMatch === null
+      ? "not found in subgraph/src/records.ts"
+      : `subgraph "${prefixMatch[1]}" vs "${expectedPrefix}"`,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // 2. Every key agrees with the Solidity constant that writes or authorizes it.
@@ -420,7 +493,7 @@ if (failed > 0) {
   process.exit(1);
 }
 const pending = checks.filter((c) => c.pending === true).length;
-console.log(`\nrecord keys and providers agree across Solidity, runner and web (${checks.length} checks)`);
+console.log(`\nrecord keys and providers agree across Solidity, runner, web and the subgraph (${checks.length} checks)`);
 if (pending > 0) {
   console.log(`${pending} key(s) exempt from the ENSIP-27 attribute check — see PENDING_RENAME.`);
 }

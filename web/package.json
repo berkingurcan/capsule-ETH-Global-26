@@ -2,7 +2,7 @@
   "name": "capsule-client",
   "version": "0.1.2",
   "private": true,
-  "description": "Capsule launchpad + fleet dashboard \u2014 front end only, mock data",
+  "description": "Capsule launchpad + fleet dashboard — front end only, mock data",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -11,6 +11,7 @@
     "preflight": "node --env-file=.env.local --import tsx scripts/preflight.ts",
     "check:wire": "node --import tsx scripts/check-wire.ts",
     "check:records": "node --import tsx scripts/check-records.ts",
+    "check:subgraph": "node --env-file-if-exists=.env.local --import tsx scripts/check-subgraph.ts",
     "typecheck": "tsc --noEmit",
     "db:migrate": "node --env-file=.env.local --import tsx scripts/migrate.ts",
     "check:store": "node --env-file=.env.local --import tsx scripts/store-check.ts",
@@ -29,6 +30,7 @@
   "dependencies": {
     "@neondatabase/serverless": "^1.1.0",
     "next": "^15.5.25",
+    "openai": "^7.13.0",
     "react": "19.1.1",
     "react-dom": "19.1.1",
     "viem": "^2.56.3"
@@ -37,6 +39,7 @@
     "@types/node": "22.10.2",
     "@types/react": "19.1.8",
     "@types/react-dom": "19.1.6",
+    "graphql": "^16.9.0",
     "tsx": "^4.23.13",
     "typescript": "5.7.2"
   }

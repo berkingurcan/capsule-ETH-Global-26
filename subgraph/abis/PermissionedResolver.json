@@ -1,0 +1,33 @@
+[
+  {
+    "type": "event",
+    "name": "TextChanged",
+    "anonymous": false,
+    "inputs": [
+      { "name": "node", "type": "bytes32", "indexed": true },
+      { "name": "indexedKey", "type": "string", "indexed": true },
+      { "name": "key", "type": "string", "indexed": false },
+      { "name": "value", "type": "string", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "EACRolesChanged",
+    "anonymous": false,
+    "inputs": [
+      { "name": "resource", "type": "uint256", "indexed": true },
+      { "name": "account", "type": "address", "indexed": true },
+      { "name": "oldRoleBitmap", "type": "uint256", "indexed": false },
+      { "name": "newRoleBitmap", "type": "uint256", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "AddrChanged",
+    "anonymous": false,
+    "inputs": [
+      { "name": "node", "type": "bytes32", "indexed": true },
+      { "name": "a", "type": "address", "indexed": false }
+    ]
+  }
+]

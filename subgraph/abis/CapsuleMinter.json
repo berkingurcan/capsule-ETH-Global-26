@@ -1,0 +1,51 @@
+[
+  {
+    "type": "event",
+    "name": "CapsuleMinted",
+    "anonymous": false,
+    "inputs": [
+      { "name": "parentNode", "type": "bytes32", "indexed": true },
+      { "name": "node", "type": "bytes32", "indexed": true },
+      { "name": "owner", "type": "address", "indexed": true },
+      { "name": "agent", "type": "address", "indexed": false },
+      { "name": "tokenId", "type": "uint256", "indexed": false },
+      { "name": "label", "type": "string", "indexed": false },
+      { "name": "expiry", "type": "uint64", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ParentConnected",
+    "anonymous": false,
+    "inputs": [
+      { "name": "parentNode", "type": "bytes32", "indexed": true },
+      { "name": "registry", "type": "address", "indexed": true },
+      { "name": "resolver", "type": "address", "indexed": true },
+      { "name": "by", "type": "address", "indexed": false },
+      { "name": "open", "type": "bool", "indexed": false }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "ParentDisconnected",
+    "anonymous": false,
+    "inputs": [
+      { "name": "parentNode", "type": "bytes32", "indexed": true },
+      { "name": "registry", "type": "address", "indexed": true },
+      { "name": "by", "type": "address", "indexed": false }
+    ]
+  },
+  {
+    "type": "function",
+    "name": "parentOf",
+    "stateMutability": "view",
+    "inputs": [{ "name": "registry", "type": "address" }],
+    "outputs": [
+      { "name": "connected", "type": "bool" },
+      { "name": "open", "type": "bool" },
+      { "name": "resolver", "type": "address" },
+      { "name": "node", "type": "bytes32" },
+      { "name": "dnsName", "type": "bytes" }
+    ]
+  }
+]
