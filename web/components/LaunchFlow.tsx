@@ -1621,7 +1621,14 @@ function StepProvision({ minted, parentName }: { minted: Minted[]; parentName: s
                 : `Start the remaining ${pending.length}`}
           </button>
         )}
-        <Link href="/fleet" className={"btn" + (pending.length > 0 ? " btn-ghost" : " btn-primary")}>
+        {/* The parent the capsules were just minted under, not the deployment's
+            default. This is the last step of the launch flow, so an unqualified
+            link sends someone straight from minting their agents to a dashboard
+            that does not contain them — which reads as "the mint failed". */}
+        <Link
+          href={`/fleet?parent=${encodeURIComponent(parentName)}`}
+          className={"btn" + (pending.length > 0 ? " btn-ghost" : " btn-primary")}
+        >
           Open the fleet →
         </Link>
         <Link href="/analyst" className="btn btn-sm btn-ghost push">

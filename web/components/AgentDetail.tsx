@@ -70,7 +70,15 @@ export default function AgentDetail({ capsule, now }: { capsule: Capsule; now: n
   return (
     <main className="page">
       <div className="wrap">
-        <Link href="/fleet" className="hint" style={{ display: "inline-block", marginBottom: 16 }}>
+        {/* Back to the fleet this capsule is actually in, not to the default one.
+            An unqualified "← Fleet" is the rare broken link that looks like it
+            worked: it lands on a real page, with a real heading, listing real
+            capsules — just somebody else's. */}
+        <Link
+          href={`/fleet?parent=${encodeURIComponent(capsule.parent)}`}
+          className="hint"
+          style={{ display: "inline-block", marginBottom: 16 }}
+        >
           ← Fleet
         </Link>
 

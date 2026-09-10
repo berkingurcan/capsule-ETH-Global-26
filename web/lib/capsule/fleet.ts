@@ -163,6 +163,26 @@ function emptyRecords(): Record<RecordKeyName, string> {
   return Object.fromEntries(RECORD_ENTRIES.map(([prop]) => [prop, ""])) as Record<RecordKeyName, string>;
 }
 
+/**
+ * One `hasRoles` multicall entry.
+ *
+ * A function rather than an inline object literal so that the argument count is
+ * checked by something. viem type-checks `args` against the ABI only when the
+ * `contracts` array is a tuple literal; build it with `.map()` — which any
+ * fleet-sized query must — and the element type widens until a two-argument call
+ * to a three-argument function compiles clean. That is exactly how every capsule
+ * came to read as recalled, so the shape of the call now lives in one signature
+ * that cannot be called wrong.
+ */
+function hasRolesCall(resolver: Address, resource: bigint, account: Address) {
+  return {
+    address: resolver,
+    abi: resolverAbi,
+    functionName: "hasRoles",
+    args: [resource, ROLE_SET_TEXT, account],
+  } as const;
+}
+
 function median(values: number[]): number | null {
   if (values.length === 0) return null;
   const sorted = [...values].sort((a, b) => a - b);
@@ -393,13 +413,31 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
       fromBlock,
       toBlock: "latest",
     }),
+    // Whether each agent may still write its own heartbeat, asked of the resolver
+    // that holds the role rather than of the minter's `isAgentAuthorized`.
+    //
+    // The minter's version takes `(registry, label, agent)`, and the registry is
+    // not something this module has: `readFleet` is handed a parent *name*, and
+    // turning that back into a registry address is another call and another way to
+    // be wrong. The resolver is already resolved above and the resource is already
+    // derived for the revocation filter below, so this asks the same question
+    // where the answer actually lives, at no extra round trip. It also makes the
+    // header of this file true — it has always claimed `hasRoles` is the third
+    // source, and until now the code called the minter instead.
+    //
+    // This is the fourth silent failure in this module's history and the worst of
+    // them: the previous call passed two arguments to a three-argument function,
+    // `allowFailure: true` turned the encoding error into `status: "failure"`, and
+    // the `false` fallback below rendered every capsule of a live fleet as
+    // recalled. Nothing caught it — `tsc` cannot check arity through a mapped
+    // array, and `scripts/check-fleet.ts` asserts agreement with the minter but
+    // does so inside a per-capsule loop that never ran, because the parent it
+    // checks had no capsules. Hence `hasRolesCall`: arity is enforced by a
+    // function signature, which is the one thing here a type checker can see.
     client.multicall({
-      contracts: mints.map((log) => ({
-        address: minter,
-        abi: minterAbi,
-        functionName: "isAgentAuthorized" as const,
-        args: [log.args.label as string, log.args.agent as Address] as const,
-      })),
+      contracts: mints.map((log, index) =>
+        hasRolesCall(resolverAddress, heartbeatResources[index], log.args.agent as Address),
+      ),
       allowFailure: true,
     }),
   ]);
