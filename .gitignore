@@ -6,3 +6,7 @@
 !.env.example
 
 node_modules/
+
+# Generated presentations, previews, and pitch site outputs
+.presentation-build/
+output/
