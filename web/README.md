@@ -2,7 +2,7 @@
 
 Front end for **Capsule** — the ENSv2 agent launchpad. `/launch` mints capsules and
 `/fleet` reads them back off ETH Sepolia; both sign with the visitor's own wallet.
-The one page still on canned data is `/analyst`, which says so on screen.
+`/analyst` answers questions from the live fleet subgraph through The Graph.
 
 ```
 npm install
@@ -15,10 +15,10 @@ npm run dev                  # http://localhost:3000
 | Route | What it shows |
 |---|---|
 | `/` | The pitch, and the mechanic diagram — how an agent dies |
-| `/launch` | The six-step launchpad: parent → roles → configure → x402 → mint → live |
+| `/launch` | The no-code launchpad: connect, configure, mint and bring the agent live |
 | `/fleet` | Every capsule you own: heartbeat, balance, recall |
 | `/fleet/[label]` | One agent: its record, its heartbeat interval, its live log, its money |
-| `/analyst` | The fleet analyst — questions answered off both subgraphs |
+| `/analyst` | The fleet analyst — natural-language answers from live indexed data |
 
 ## What the UI is arguing
 
@@ -51,13 +51,6 @@ money, **Mint** means running, **Sun** is the 402 stamp and any warning, and
 wrote; Azeret Mono for anything a machine issued — an ENS name is always
 machine-issued.
 
-## Where the fake data lives
-
-One file, named for what it is: [`lib/analyst-demo.ts`](lib/analyst-demo.ts), the
-analyst's worked answers, pending the subgraph. Nothing on `/fleet` imports it —
-every value there is read from the chain — and an import of it from anywhere else is
-a bug you can grep for.
-
 ## The checks
 
 None of them send a transaction, and each one asserts something a passing build does
@@ -70,10 +63,3 @@ not. Run them against a live `.env.local`.
 | `npm run check:mint` | the mint, simulated — struct order, reverts, `CapsuleMinted` |
 | `npm run check:recall` | the kill switch, simulated from the real owner and from a stranger |
 | `npm run check:prepare` / `check:provision` | the two server routes |
-
-## Not wired up
-
-The x402 handshake, Fly log streams and the MCP analyst are still simulated. The
-recall is not: `/fleet` sends `authorizeTextRoles(dnsName, "agent-heartbeat", agent,
-false)` from the owner's wallet to the name's own resolver, and reports the capsule
-recalled only after reading the permission back.
