@@ -71,6 +71,35 @@ export function nameResourceOf(node: Bytes): string {
 }
 
 /**
+ * The same thing on the ENS hackathon resolver, where it is a different thing.
+ *
+ * Verbatim from `PermissionedResolverLib`:
+ *
+ *     function resource(string calldata s) internal pure returns (uint256) {
+ *         return uint256(keccak256(bytes(s)));
+ *     }
+ *
+ * The name is not in it. One resource guards `agent-heartbeat` across every
+ * capsule a resolver serves, so this value identifies the KEY and never the
+ * capsule — which is why the role handler joins on the agent address instead
+ * and uses this only to confirm the grant was about the heartbeat at all.
+ */
+export function inodeResourceOf(key: string): string {
+  return bigIntFromBigEndian(crypto.keccak256(Bytes.fromUTF8(key))).toString();
+}
+
+/**
+ * `AgentRef`'s id — the pair an EAC role actually belongs to.
+ *
+ * Scoped by resolver because roles live in one contract's storage: the same
+ * agent address under two owners' resolvers holds two unrelated permissions,
+ * and one key for both would let a revoke on one recall capsules on the other.
+ */
+export function agentKey(resolver: Bytes, agent: Bytes): string {
+  return resolver.toHexString() + "-" + agent.toHexString();
+}
+
+/**
  * A big-endian 32-byte hash as a `BigInt`.
  *
  * `BigInt.fromUnsignedBytes` reads little-endian, which is the opposite of

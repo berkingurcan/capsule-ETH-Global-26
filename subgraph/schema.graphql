@@ -36,6 +36,13 @@ type Parent @entity(immutable: false) {
   dnsName: Bytes!
   "The PermissionedResolver capsule records under this name are written to."
   resolver: Bytes!
+  """
+  Which ENSv2 deployment this parent sits on: true for the ENS hackathon
+  revision, whose resolver addresses records by DNS wire name and numbers them
+  internally, false for the beta's namehash-keyed one. Both are live on
+  Sepolia. Detected by the minter at `connectParent` and read back here.
+  """
+  inode: Boolean!
   "Whether anybody may mint here, or only this registry's admins."
   open: Boolean!
   "False after `disconnectParent`. Capsules already minted are untouched."
@@ -232,6 +239,11 @@ Internal: EAC resource id -> the capsule and key it guards.
 `EACRolesChanged` carries a hashed resource and nothing else, so without this
 a role change cannot be attributed to a name. Written at mint for both
 resources a capsule has.
+
+Only the ENSv2 beta resolver can be joined this way. Its resource is
+`keccak256(abi.encode(node, keccak256(key)))` — one per (name, key) pair, so
+the id identifies a capsule. The hackathon revision hashes the key ALONE, and
+that resource is shared by every name the resolver serves; see `AgentRef`.
 """
 type ResourceRef @entity(immutable: true) {
   "The uint256 resource, as a decimal string."
@@ -239,6 +251,56 @@ type ResourceRef @entity(immutable: true) {
   capsule: Capsule!
   "`agent-heartbeat` or `name`."
   kind: String!
+}
+
+"""
+Internal: (resolver, agent EOA) -> every capsule that pair beats for.
+
+The join `ResourceRef` cannot make on the hackathon resolver. There
+`PermissionedResolverLib.resource(string key)` is `uint256(keccak256(key))`
+with the name playing no part, so a single resource guards `agent-heartbeat`
+for every capsule under one resolver and the id says nothing about which.
+What the event does carry is `account`, so the agent is the discriminator.
+
+`capsules` is a list rather than one capsule, and that is not defensive
+coding — it is the permission's actual shape. `setText` checks
+`resource(key)` and nothing else, so revoking an agent's `ROLE_SET_TEXT` on
+`agent-heartbeat` stops it writing for EVERY name the resolver serves. An
+agent reused across several capsules therefore has one permission between
+them, and one revoke recalls all of them at once. Recording that against a
+single capsule would leave the rest showing as live with a key that can no
+longer write.
+
+That happens in practice: the batch mint script signs every capsule with one
+`AGENT_KEY`, while the web provisioner generates a fresh one per capsule.
+"""
+type AgentRef @entity(immutable: false) {
+  "`<resolver hex>-<agent hex>`. Scoped by resolver — roles are per contract."
+  id: String!
+  resolver: Bytes!
+  agent: Bytes!
+  "namehashes. Usually one; see above for when it is not."
+  capsules: [Bytes!]!
+}
+
+"""
+Internal: `<resolver>-<recordId>` -> the namehash that record belongs to.
+
+The hackathon resolver numbers records internally and its write events carry
+only that number. The node appears once, in `Linked`, when the record is
+created — so this is that event, kept.
+
+Scoped by resolver because `recordId` counts from 1 in each resolver's own
+storage: two owners' first records are both `1`, and a global key would make
+one of them shadow the other.
+"""
+type RecordNode @entity(immutable: false) {
+  "`<resolver hex>-<recordId decimal>`."
+  id: String!
+  resolver: Bytes!
+  recordId: BigInt!
+  "namehash of the name this record serves."
+  node: Bytes!
 }
 
 """

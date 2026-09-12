@@ -35,6 +35,7 @@ import {
 } from "../generated/CapsuleMinter/CapsuleMinter";
 import { PermissionedResolver } from "../generated/templates";
 import {
+  AgentRef,
   Capsule,
   Fleet,
   Parent,
@@ -46,7 +47,9 @@ import {
   KEY_HEARTBEAT,
   KIND_HEARTBEAT,
   KIND_NAME,
+  agentKey,
   decodeDnsName,
+  inodeResourceOf,
   nameResourceOf,
   textResourceOf,
 } from "./records";
@@ -87,6 +90,7 @@ export function handleParentConnected(event: ParentConnected): void {
     parent.connectedAtBlock = event.block.number;
     parent.name = "";
     parent.dnsName = Bytes.empty();
+    parent.inode = false;
   }
 
   parent.node = event.params.parentNode;
@@ -100,6 +104,12 @@ export function handleParentConnected(event: ParentConnected): void {
   // which `ParentConnected` does not carry and which nothing else on chain
   // publishes in a form this subgraph can reach. Without it every capsule
   // here would be a bare label.
+  //
+  // It also buys `inode`, the minter's own answer to which ENSv2 deployment
+  // this parent sits on. Probed there at connect time by calling a function
+  // only the hackathon resolver has; taken here rather than probed again,
+  // because two independent detections that could disagree is one more than
+  // this index can defend.
   const minter = CapsuleMinter.bind(event.address);
   const stored = minter.try_parentOf(registry);
   if (stored.reverted) {
@@ -110,6 +120,7 @@ export function handleParentConnected(event: ParentConnected): void {
   } else {
     parent.dnsName = stored.value.getDnsName();
     parent.name = decodeDnsName(stored.value.getDnsName());
+    parent.inode = stored.value.getInode();
   }
   parent.save();
 
@@ -191,7 +202,12 @@ export function handleCapsuleMinted(event: CapsuleMinted): void {
   capsule.registrationKey = "";
   capsule.registrationValue = "";
 
-  const heartbeatResource = textResourceOf(node, KEY_HEARTBEAT);
+  // Two deployments, two derivations, and the wrong one is not an error — it
+  // is a resource id that matches no event, so nothing is ever attributed and
+  // the fleet renders as one where no capsule was ever recalled.
+  const heartbeatResource = parent.inode
+    ? inodeResourceOf(KEY_HEARTBEAT)
+    : textResourceOf(node, KEY_HEARTBEAT);
   const nameResource = nameResourceOf(node);
   capsule.heartbeatResource = heartbeatResource;
   capsule.nameResource = nameResource;
@@ -208,10 +224,22 @@ export function handleCapsuleMinted(event: CapsuleMinted): void {
   capsule.ownerWriteCount = 0;
   capsule.save();
 
-  // The two resources a role change can arrive on, so `EACRolesChanged` —
-  // which carries a hash and nothing else — can be attributed to this name.
-  addResourceRef(heartbeatResource, node, KIND_HEARTBEAT);
-  addResourceRef(nameResource, node, KIND_NAME);
+  // How a role change finds its way back to this capsule.
+  //
+  // On the beta both resources name it outright, so both are registered. On
+  // the hackathon revision the heartbeat resource is `keccak256(key)` and is
+  // shared by every capsule under this resolver — registering it would bind
+  // the whole resolver's recalls to whichever capsule minted first, and
+  // `addResourceRef` keeps the first writer, so the wrong answer would be a
+  // stable one. The agent address is the join there instead.
+  if (!parent.inode) {
+    addResourceRef(heartbeatResource, node, KIND_HEARTBEAT);
+    addResourceRef(nameResource, node, KIND_NAME);
+  }
+
+  // Written on both deployments, because it costs one row and it is the only
+  // join that stays correct if a parent ever moves between them.
+  addAgentRef(changetype<Address>(parent.resolver), event.params.agent, node);
 
   parent.capsuleCount = parent.capsuleCount + 1;
   parent.save();
@@ -258,5 +286,34 @@ function addResourceRef(resource: string, node: Bytes, kind: string): void {
   const ref = new ResourceRef(resource);
   ref.capsule = node;
   ref.kind = kind;
+  ref.save();
+}
+
+/**
+ * Append this capsule to the list its (resolver, agent) pair beats for.
+ *
+ * Appends rather than replaces: one agent key can be reused across capsules —
+ * the batch mint script does exactly that — and on the hackathon resolver
+ * those capsules then share a single heartbeat permission. `AgentRef` in the
+ * schema has the full reasoning.
+ */
+function addAgentRef(resolver: Address, agent: Bytes, node: Bytes): void {
+  const id = agentKey(resolver, agent);
+  let ref = AgentRef.load(id);
+  if (ref == null) {
+    ref = new AgentRef(id);
+    ref.resolver = resolver;
+    ref.agent = agent;
+    ref.capsules = [];
+  }
+
+  // Reassigned rather than mutated in place: an entity's array field is a copy
+  // on read, so `ref.capsules.push(node)` writes to a value nothing saves.
+  const capsules = ref.capsules;
+  for (let i = 0; i < capsules.length; i++) {
+    if (capsules[i].equals(node)) return; // already listed
+  }
+  capsules.push(node);
+  ref.capsules = capsules;
   ref.save();
 }

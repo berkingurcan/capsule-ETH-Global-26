@@ -4,10 +4,26 @@
     "name": "TextChanged",
     "anonymous": false,
     "inputs": [
-      { "name": "node", "type": "bytes32", "indexed": true },
-      { "name": "indexedKey", "type": "string", "indexed": true },
-      { "name": "key", "type": "string", "indexed": false },
-      { "name": "value", "type": "string", "indexed": false }
+      {
+        "name": "node",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "indexedKey",
+        "type": "string",
+        "indexed": true
+      },
+      {
+        "name": "key",
+        "type": "string",
+        "indexed": false
+      },
+      {
+        "name": "value",
+        "type": "string",
+        "indexed": false
+      }
     ]
   },
   {
@@ -15,10 +31,26 @@
     "name": "EACRolesChanged",
     "anonymous": false,
     "inputs": [
-      { "name": "resource", "type": "uint256", "indexed": true },
-      { "name": "account", "type": "address", "indexed": true },
-      { "name": "oldRoleBitmap", "type": "uint256", "indexed": false },
-      { "name": "newRoleBitmap", "type": "uint256", "indexed": false }
+      {
+        "name": "resource",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "account",
+        "type": "address",
+        "indexed": true
+      },
+      {
+        "name": "oldRoleBitmap",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "newRoleBitmap",
+        "type": "uint256",
+        "indexed": false
+      }
     ]
   },
   {
@@ -26,8 +58,87 @@
     "name": "AddrChanged",
     "anonymous": false,
     "inputs": [
-      { "name": "node", "type": "bytes32", "indexed": true },
-      { "name": "a", "type": "address", "indexed": false }
+      {
+        "name": "node",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "a",
+        "type": "address",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "TextUpdated",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "recordId",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "keyHash",
+        "type": "string",
+        "indexed": true
+      },
+      {
+        "name": "key",
+        "type": "string",
+        "indexed": false
+      },
+      {
+        "name": "value",
+        "type": "string",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "AddressUpdated",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "recordId",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "coinType",
+        "type": "uint256",
+        "indexed": false
+      },
+      {
+        "name": "addressBytes",
+        "type": "bytes",
+        "indexed": false
+      }
+    ]
+  },
+  {
+    "type": "event",
+    "name": "Linked",
+    "anonymous": false,
+    "inputs": [
+      {
+        "name": "recordId",
+        "type": "uint256",
+        "indexed": true
+      },
+      {
+        "name": "node",
+        "type": "bytes32",
+        "indexed": true
+      },
+      {
+        "name": "name",
+        "type": "bytes",
+        "indexed": false
+      }
     ]
   }
 ]

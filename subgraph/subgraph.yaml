@@ -72,15 +72,39 @@ templates:
         - Heartbeat
         - RoleChange
         - ResourceRef
+        - AgentRef
+        - RecordNode
       abis:
         - name: PermissionedResolver
           file: ./abis/PermissionedResolver.json
       eventHandlers:
-        # A resolver serves every name its owner has, not only capsules. Both
-        # handlers below return early for a node this subgraph has never minted.
+        # Two ENSv2 deployments are live on Sepolia and a parent sits on one of
+        # them, so the same template serves two resolver revisions with
+        # incompatible record events. Both sets are declared and whichever the
+        # resolver actually emits is the set that fires — which is cheaper and
+        # steadier than detecting the revision and picking a template, and it
+        # needs no flag on `ParentConnected`, which carries none.
+        #
+        # A resolver also serves every name its owner has, not only capsules,
+        # so every handler below returns early for a node never minted here.
+
+        # --- the ENSv2 beta: records keyed by namehash -------------------
         - event: TextChanged(indexed bytes32,indexed string,string,string)
           handler: handleTextChanged
         - event: AddrChanged(indexed bytes32,address)
           handler: handleAddrChanged
+
+        # --- the ENS hackathon revision: records numbered ----------------
+        # `Linked` must be declared even though it writes no user-facing
+        # entity: it is the only event carrying both a record id and a node,
+        # and without it every TextUpdated below is unattributable.
+        - event: Linked(indexed uint256,indexed bytes32,bytes)
+          handler: handleLinked
+        - event: TextUpdated(indexed uint256,indexed string,string,string)
+          handler: handleTextUpdated
+        - event: AddressUpdated(indexed uint256,uint256,bytes)
+          handler: handleAddressUpdated
+
+        # --- both: the kill switch ---------------------------------------
         - event: EACRolesChanged(indexed uint256,indexed address,uint256,uint256)
           handler: handleRolesChanged
