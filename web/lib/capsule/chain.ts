@@ -28,71 +28,72 @@ import { sepolia } from "viem/chains";
 
 export const CHAIN = sepolia;
 
-/** ENSv2 Sepolia beta. The resolver address is per-owner, so every read goes
- *  through here rather than to a resolver we would have to know in advance. */
-export const UNIVERSAL_RESOLVER_V2 = "0x4a1817d13e9cf196f471725176355c1234b63c70" as const;
-
 /**
- * `ETHRegistry` on the ENSv2 Sepolia beta — the registry holding every `.eth`
- * second-level name.
+ * There are two ENSv2 deployments live on Sepolia at once, and they share
+ * nothing but the chain.
  *
- * This is how a parent name is turned into something the minter can be pointed
- * at: `getSubregistry("berkin")` answers the `PermissionedRegistry` that issues
- * `*.berkin.eth`, and that registry address IS the handle `CapsuleMinter` keys
- * a connected parent by. Nothing about a parent needs configuring in this app
- * as a result — the chain knows where every name's subnames live.
+ * `beta` is ENS's own long-running ENSv2 beta. `hackathon` is the deployment
+ * behind the official hackathon portal, and is a LATER revision of the same
+ * contracts — the one ENS DevRel points entrants at.
  *
- * `getResolver` on this contract is deliberately never used to find a parent's
- * resolver. It answers `PublicResolverV2` for `capsulefleet.eth`, which cannot
- * authorize ENSv2-native names at all (contracts/NOTES.md, gotcha 2); the
- * resolver capsules actually use is the one the parent's admin handed to
- * `connectParent`, and it is read back from the minter.
+ * A name registered on one does not exist on the other: `capsulefleet.eth`
+ * resolves on `beta` and is an unregistered label on `hackathon`. That is not a
+ * bug in either, and it is the entire reason this file is shaped as a table
+ * instead of a list of constants.
+ *
+ * The registry ABI is identical across the two, verified by selector-diffing the
+ * deployed bytecode. The RESOLVER ABI is not — see `inodeResolver`.
  */
-export const ETH_REGISTRY = "0xBDC85dD5b15D7ecb354cd7cb6f2c50b4f2c4F0E2" as const;
+export type EnsDeployment = "beta" | "hackathon";
 
-/**
- * The two addresses /connect needs to give a name its own resolver.
- *
- * An ENSv2 name does not come with a resolver that can authorize it. The one
- * `ETHRegistry` reports is `PublicResolverV2`, whose `canModifyName` reverse-
- * resolves through the ENSv1 NameWrapper and therefore fails for every name
- * registered through the v2 registrar (contracts/NOTES.md, gotcha 2). So each
- * parent needs a `PermissionedResolver` of its own, deployed as a UUPS proxy
- * through `VerifiableFactory`:
- *
- *     deployProxy(PERMISSIONED_RESOLVER_IMPL, salt, initialize(admin, roles, []))
- *
- * The proxy address is deterministic in `(factory, proxyLogic, deployer, salt)`,
- * so the same wallet with the same salt always lands on the same resolver — which
- * is what makes a half-finished connect resumable rather than a source of
- * abandoned resolvers.
- */
-/**
- * `LabelStore` — the deployment's shared label registry.
- *
- * Every `PermissionedRegistry` is constructed against it, so a subregistry
- * deployed by this app has to be given the same one ENS's own contracts use, or
- * the labels it mints are invisible to the rest of the deployment.
- */
-export const LABEL_STORE = "0x532cd0cc4ac0793d838f71a67d29b2d790d18777" as const;
-
-export const VERIFIABLE_FACTORY = "0x10dc6333cdfe1fcef624c6e0a8221b91804cd7ef" as const;
-export const PERMISSIONED_RESOLVER_IMPL = "0x9eae5c2730a7dd16bdd1dee6421a1b91e3b0365e" as const;
-
-/**
- * `ETHRegistrar` — where a `.eth` second-level name is bought.
- *
- * The step before everything else in this app. `/connect` and `/launch` both
- * begin with a name their user already owns, and on a deployment three days old
- * that is not a safe assumption, so `/register` sells them one.
- *
- * Registration is commit–reveal: `commit(makeCommitment(...))`, wait
- * `MIN_COMMITMENT_AGE`, then `register(...)` with the identical arguments. The
- * gap exists so that watching the mempool does not tell a front-runner which
- * label to take, which is also why the secret has to survive a page reload —
- * see `register.ts`.
- */
-export const ETH_REGISTRAR = "0xa88553f454b77203b0d036a05c894d555eaaa2cc" as const;
+export type DeploymentAddresses = {
+  id: EnsDeployment;
+  label: string;
+  /** The resolver address is per-owner, so every read goes through here rather
+   *  than to a resolver we would have to know in advance. */
+  universalResolver: Address;
+  /** The registry holding every `.eth` second-level name on this deployment. */
+  ethRegistry: Address;
+  /** Shared label database. Every registry is constructed against it, so a
+   *  subregistry given the wrong one mints labels the rest of the deployment
+   *  cannot see. */
+  labelStore: Address;
+  verifiableFactory: Address;
+  permissionedResolverImpl: Address;
+  ethRegistrar: Address;
+  /**
+   * `UserRegistry`, the implementation a name's subregistry is a proxy of.
+   *
+   * Only the hackathon deployment has one. On `beta` a subregistry is deployed
+   * whole from vendored bytecode (`registry-bytecode.ts`) because there is no
+   * factory for it; here it is a cheap `deployProxy`, which is strictly better
+   * and lets the 31KB constant stay out of the bundle.
+   */
+  userRegistryImpl?: Address;
+  /**
+   * Whether this deployment's `PermissionedResolver` is the later "record"
+   * revision, in which records are addressed by DNS wire name rather than
+   * namehash and permissions hang off the setter ARGUMENT alone.
+   *
+   * The difference is not cosmetic and not a superset:
+   *
+   *   beta       setText(bytes32 node, string key, string value)
+   *   hackathon  setText(bytes name,   string key, string value)
+   *
+   *   beta       setAddr(bytes32 node, address addr)
+   *   hackathon  setAddress(bytes name, uint256 coinType, bytes addr)
+   *
+   *   beta       authorizeTextRoles(bytes name, string key, address, bool)
+   *   hackathon  grantSetterRoles(bytes setter, address)   — NOT name-scoped
+   *
+   * `text(bytes32,string)` does not exist on the hackathon resolver at all:
+   * reads there are ENSIP-10 only, through `resolve(name, data)`.
+   *
+   * See contracts/NOTES.md gotcha 16 for what the last line costs us.
+   */
+  inodeResolver: boolean;
+  paymentTokens: readonly PaymentToken[];
+};
 
 /**
  * What the registrar will take as payment, and it is a fixed list.
@@ -120,33 +121,102 @@ export type PaymentToken = {
   note: string;
 };
 
-export const PAYMENT_TOKENS: readonly PaymentToken[] = [
-  {
-    address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
-    symbol: "USDC",
-    label: "Circle USDC",
-    decimals: 6,
-    mintable: false,
-    faucet: "https://faucet.circle.com/",
-    note: "the real Sepolia USDC — the registrar charges the same for it as for the test tokens",
+export const DEPLOYMENTS: Record<EnsDeployment, DeploymentAddresses> = {
+  hackathon: {
+    id: "hackathon",
+    label: "ENS hackathon deployment",
+    universalResolver: "0xd26f2040D083Af1cD2962ba303F4BEa0c4faf142",
+    ethRegistry: "0x1D78834d97c1D7b1A38c1deDBD1a287cFEd3971e",
+    labelStore: "0xd7351f76866123a7e49381f38a30a96adba7e855",
+    verifiableFactory: "0x894bc9cC8ff1ad96B8a288C86A8C71D662C07780",
+    permissionedResolverImpl: "0xa9d3814AB151BF6E37A427432795371a8361614e",
+    ethRegistrar: "0x7d1B7f586a62Ac3F54b9A396849757814283270b",
+    userRegistryImpl: "0x47B442d0CF617c41CAbAFf5f02f44DD1e5f72546",
+    inodeResolver: true,
+    paymentTokens: [
+      {
+        address: "0xcBFD80F74375c54E545AF34788Ff465F96F66F05",
+        symbol: "USDC",
+        label: "Test USDC",
+        decimals: 6,
+        mintable: true,
+        note: "this deployment's own token — mint yourself as much as you need, free",
+      },
+      {
+        address: "0x93403a98c3A6be906585CD0D68447c0Fc600FB38",
+        symbol: "DAI",
+        label: "Test DAI",
+        decimals: 18,
+        mintable: true,
+        note: "same deal as test USDC, eighteen decimals",
+      },
+    ],
   },
-  {
-    address: "0x768f42455a2d082e23ceef7d51e5787c82d67a39",
-    symbol: "USDC",
-    label: "Test USDC",
-    decimals: 6,
-    mintable: true,
-    note: "the hackathon deployment's own token — mint yourself as much as you need, free",
+  beta: {
+    id: "beta",
+    label: "ENSv2 Sepolia beta",
+    universalResolver: "0x4a1817d13e9cf196f471725176355c1234b63c70",
+    ethRegistry: "0xBDC85dD5b15D7ecb354cd7cb6f2c50b4f2c4F0E2",
+    labelStore: "0x532cd0cc4ac0793d838f71a67d29b2d790d18777",
+    verifiableFactory: "0x10dc6333cdfe1fcef624c6e0a8221b91804cd7ef",
+    permissionedResolverImpl: "0x9eae5c2730a7dd16bdd1dee6421a1b91e3b0365e",
+    ethRegistrar: "0xa88553f454b77203b0d036a05c894d555eaaa2cc",
+    inodeResolver: false,
+    paymentTokens: [
+      {
+        address: "0x1c7D4B196Cb0C7B01d743Fbc6116a902379C7238",
+        symbol: "USDC",
+        label: "Circle USDC",
+        decimals: 6,
+        mintable: false,
+        faucet: "https://faucet.circle.com/",
+        note: "the real Sepolia USDC — the registrar charges the same for it as for the test tokens",
+      },
+      {
+        address: "0x768f42455a2d082e23ceef7d51e5787c82d67a39",
+        symbol: "USDC",
+        label: "Test USDC",
+        decimals: 6,
+        mintable: true,
+        note: "this deployment's own token — mint yourself as much as you need, free",
+      },
+      {
+        address: "0x5472c5725a00b7ba11f0794a79d08ade6f4683bd",
+        symbol: "DAI",
+        label: "Test DAI",
+        decimals: 18,
+        mintable: true,
+        note: "same deal as test USDC, eighteen decimals",
+      },
+    ],
   },
-  {
-    address: "0x5472c5725a00b7ba11f0794a79d08ade6f4683bd",
-    symbol: "DAI",
-    label: "Test DAI",
-    decimals: 18,
-    mintable: true,
-    note: "same deal as test USDC, eighteen decimals",
-  },
-] as const;
+};
+
+/**
+ * Which deployment this app registers NEW names on, and the fallback whenever a
+ * name's own deployment cannot be determined.
+ *
+ * Defaults to `hackathon`, because that is the deployment the official portal
+ * mints on and therefore the one a judge's name will live in. Reads still work
+ * against both — `deploymentOfName` decides per name, not per process — so
+ * capsules already minted on `beta` keep resolving with this set either way.
+ */
+export const DEFAULT_DEPLOYMENT: EnsDeployment =
+  process.env.NEXT_PUBLIC_ENS_DEPLOYMENT === "beta" ? "beta" : "hackathon";
+
+export const ACTIVE = DEPLOYMENTS[DEFAULT_DEPLOYMENT];
+
+// Legacy flat exports, bound to the active deployment. Every call site that
+// cares which deployment it is talking to takes a `DeploymentAddresses` instead;
+// these remain for the paths where there is only ever one answer (`/register`
+// sells names on the active deployment and nowhere else).
+export const UNIVERSAL_RESOLVER_V2 = ACTIVE.universalResolver;
+export const ETH_REGISTRY = ACTIVE.ethRegistry;
+export const LABEL_STORE = ACTIVE.labelStore;
+export const VERIFIABLE_FACTORY = ACTIVE.verifiableFactory;
+export const PERMISSIONED_RESOLVER_IMPL = ACTIVE.permissionedResolverImpl;
+export const ETH_REGISTRAR = ACTIVE.ethRegistrar;
+export const PAYMENT_TOKENS = ACTIVE.paymentTokens;
 
 export const ethRegistrarAbi = parseAbi([
   "error CommitmentTooNew(bytes32 commitment, uint64 validFrom, uint64 blockTimestamp)",
@@ -209,6 +279,68 @@ export const verifiableFactoryAbi = parseAbi([
 export const resolverInitAbi = parseAbi([
   "function initialize(address admin, uint256 roleBitmap, bytes[] setters)",
 ]);
+
+/**
+ * The same job on the hackathon deployment, and a different shape.
+ *
+ * `beta` takes one admin and one bitmap; this takes a LIST of grants, which is
+ * what lets /connect grant the owner and the minter in the single transaction
+ * that deploys the proxy. The trailing `bytes[]` is multicalled during
+ * initialization with permission checks suppressed, so records can be written
+ * before any role exists to write them.
+ */
+export const resolverInitAbiV2 = parseAbi([
+  "struct Grant { address account; uint256 roleBitmap; }",
+  "function initialize(Grant[] grants, bytes[] calls)",
+]);
+
+/** `UserRegistry.initialize` — the hackathon deployment's subregistry proxy. */
+export const userRegistryInitAbi = parseAbi([
+  "struct Grant { address account; uint256 roleBitmap; }",
+  "function initialize(Grant[] grants)",
+]);
+
+/**
+ * The hackathon resolver's record calls.
+ *
+ * Every setter takes the DNS wire name where the beta takes a namehash, and
+ * `setAddr(bytes32,address)` becomes `setAddress(name, coinType, bytes)`.
+ * `text(bytes32,string)` has no counterpart at all — reads go through
+ * `resolve()` below, which is ENSIP-10 and works on both deployments.
+ *
+ * `grantSetterRoles` is the replacement for `authorizeTextRoles`, and it is a
+ * weaker thing than the name suggests: the resource is `keccak256(key)` with the
+ * name playing no part, so a grant made through it reaches every name this
+ * resolver serves. The `name` argument is decoded and discarded. That is why
+ * /recall cannot narrow a revocation to one capsule here.
+ */
+export const inodeResolverAbi = parseAbi([
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "error EACCannotGrantRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "error UnsupportedResolverProfile(bytes4 selector)",
+  "error DNSDecodingFailed(bytes dns)",
+  "function setText(bytes name, string key, string value)",
+  "function setAddress(bytes name, uint256 coinType, bytes addressBytes)",
+  "function grantSetterRoles(bytes setter, address account) returns (bool)",
+  "function getRecordCount() view returns (uint256)",
+  "function getRecordId(bytes32 node) view returns (uint256)",
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+  "function grantRootRoles(uint256 roleBitmap, address account) returns (bool)",
+  "function revokeRootRoles(uint256 roleBitmap, address account) returns (bool)",
+  "function revokeRoles(uint256 resource, uint256 roleBitmap, address account) returns (bool)",
+]);
+
+/**
+ * The EAC resource guarding one text key on the hackathon resolver.
+ *
+ * `keccak256(key)`, with no node in it — which is the whole of gotcha 16. The
+ * beta's equivalent is `textResourceOf(node, key)` further down, and the two are
+ * not interchangeable: passing a beta resource here silently answers about a
+ * key nobody has.
+ */
+export function inodeTextResourceOf(key: string): bigint {
+  return BigInt(keccak256(toHex(key)));
+}
 
 
 export const universalResolverAbi = parseAbi([
@@ -376,7 +508,11 @@ export const minterAbi = parseAbi([
   "function disconnectParent(address registry)",
 
   // --- what the launch form and /connect read before they let anyone sign ---
-  "function parentOf(address registry) view returns (bool connected, bool open, address resolver, bytes32 node, bytes dnsName)",
+  // `inode` is the sixth return and says which ENSv2 deployment the parent's
+  // resolver belongs to — the minter detects it at connect time by probing for a
+  // function only the hackathon revision has. Read it rather than guessing: it
+  // decides which resolver ABI a record write has to speak.
+  "function parentOf(address registry) view returns (bool connected, bool open, address resolver, bytes32 node, bytes dnsName, bool inode)",
   // One call, five booleans: connected, the two grants, open, and whether THIS account
   // would get past the check. The form gates every button on it, because the
   // alternative is finding out which step was skipped from a revert after signing.
@@ -474,6 +610,46 @@ export const registryDeployAbi = parseAbi([
  * four-capsule fleet is around sixty round trips to a public RPC, which is both
  * slow and a good way to get rate limited mid-render.
  */
+/**
+ * Which deployment a second-level `.eth` label actually lives on.
+ *
+ * Both registries are asked in parallel and the one that reports an owner wins.
+ * A label registered on neither returns `null`, which is a real and common
+ * answer — it is what an unregistered name looks like — and callers should say
+ * "not registered" rather than guessing a deployment.
+ *
+ * This is the function that makes dual support more than a build-time switch: a
+ * user pastes a name and the app works out where it is, instead of being told by
+ * an environment variable that is right half the time. `findOwner` rather than
+ * `findTokenId`, because the latter derives an id from the label and so returns
+ * non-zero for names nobody has ever registered.
+ */
+export async function deploymentOfName(
+  client: PublicClient,
+  label: string,
+): Promise<DeploymentAddresses | null> {
+  const candidates = Object.values(DEPLOYMENTS);
+  const owners = await Promise.all(
+    candidates.map((d) =>
+      client
+        .readContract({
+          address: d.ethRegistry,
+          abi: registryAbi,
+          functionName: "findOwner",
+          args: [label],
+        })
+        .catch(() => ZERO_ADDRESS),
+    ),
+  );
+  const hits = candidates.filter((_, i) => owners[i] !== ZERO_ADDRESS);
+  // A label held on both is possible — nothing stops the same word being
+  // registered twice by different people — so prefer the active deployment
+  // rather than whichever Object.values happened to order first.
+  return hits.find((d) => d.id === DEFAULT_DEPLOYMENT) ?? hits[0] ?? null;
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as Address;
+
 export function createServerClient(rpcUrl: string): PublicClient {
   return createPublicClient({
     chain: CHAIN,

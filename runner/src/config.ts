@@ -21,9 +21,16 @@ import {
   type Hex,
   type PublicClient,
 } from "viem";
-import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
+
 import { shortRevert } from "./errors.js";
-import { decodeText, encodeName, resolverAbi, universalResolverAbi } from "./resolve.js";
+import {
+  decodeText,
+  detectInodeResolver,
+  encodeName,
+  resolverAbi,
+  universalResolverAbi,
+  universalResolverFor,
+} from "./resolve.js";
 import {
   POLICY_KEYS,
   RECORD_KEYS,
@@ -48,6 +55,17 @@ export type Heartbeat = {
 export type CapsuleConfig = {
   name: string;
   node: Hex;
+  /** DNS wire format. What the hackathon deployment's `setText` takes. */
+  dnsName: Hex;
+  /**
+   * Whether `resolver` is the ENS hackathon deployment's revision, in which
+   * records are keyed by DNS name rather than namehash.
+   *
+   * Detected at boot, because the two deployments are both live on Sepolia and
+   * a capsule's parent may sit on either. Reads do not care — everything here
+   * reads through ENSIP-10 — but the heartbeat write has to pick a selector.
+   */
+  inode: boolean;
   /** Discovered, never hardcoded — every owner has their own resolver proxy. */
   resolver: Address;
   /** The `addr` record. Verified to be this runner's own address. */
@@ -118,9 +136,14 @@ export async function loadCapsuleConfig(
   // One round trip. The loop re-reads this every tick forever; five separate
   // calls is how you get rate-limited off a public RPC halfway through a demo.
   // allowFailure keeps a single bad record from hiding the other four.
+  /* Which deployment serves this name, settled before the batch. A multicall is
+     pinned to one address, so the two-deployment fallback cannot happen inside
+     it — the `addr` read doubles as the probe. */
+  const universalResolver = await universalResolverFor(client, dnsName, inner[0]!);
+
   const results = await client.multicall({
     contracts: inner.map((data) => ({
-      address: UNIVERSAL_RESOLVER_V2,
+      address: universalResolver,
       abi: universalResolverAbi,
       functionName: "resolve",
       args: [dnsName, data],
@@ -214,6 +237,8 @@ export async function loadCapsuleConfig(
   return {
     name: normalized,
     node,
+    dnsName,
+    inode: await detectInodeResolver(client, resolver as Address),
     resolver: resolver as Address,
     agent,
     model: rawModel,

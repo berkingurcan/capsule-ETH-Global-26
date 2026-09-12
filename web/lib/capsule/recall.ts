@@ -59,6 +59,8 @@ import {
 import {
   ROLE_SET_TEXT,
   ROLE_SET_TEXT_ADMIN,
+  inodeResolverAbi,
+  inodeTextResourceOf,
   nameResourceOf,
   resolverAdminAbi,
   textResourceOf,
@@ -168,6 +170,51 @@ export function buildRecallArgs(target: RecallTarget): readonly [Hex, string, Ad
   return [encodeName(target.name).dnsName, RECORD_KEYS.heartbeat, target.agent, false] as const;
 }
 
+/**
+ * Which resolver revision this capsule's name is served by.
+ *
+ * Probed from the resolver rather than threaded through the UI, the same way
+ * `CapsuleMinter` does it: `getRecordCount()` exists only on the ENS hackathon
+ * deployment's revision. A recall is a rare, deliberate action, so one extra
+ * read to get the call shape right is the cheapest possible insurance against
+ * sending a transaction that reverts in a wallet.
+ */
+async function usesInodeResolver(
+  publicClient: PublicClient,
+  resolver: Address,
+): Promise<boolean> {
+  try {
+    await publicClient.readContract({
+      address: resolver,
+      abi: inodeResolverAbi,
+      functionName: "getRecordCount",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The EAC resource the heartbeat role actually sits on, per deployment.
+ *
+ * On the beta it is `(node, key)` — one key on one name. On the hackathon
+ * revision it is `keccak256(key)` alone, shared by every name the resolver
+ * serves.
+ *
+ * The recall is still precise despite that, and it is worth being clear why:
+ * roles are held per `(resource, account)`, and each capsule has its own agent
+ * EOA, so revoking THIS agent removes only this agent's access. What the wider
+ * resource costs is the grant, not the revoke — while authorized, an agent can
+ * write the heartbeat key on its siblings' names too. See contracts/NOTES.md
+ * gotcha 16.
+ */
+function heartbeatResource(target: RecallTarget, inode: boolean): bigint {
+  return inode
+    ? inodeTextResourceOf(RECORD_KEYS.heartbeat)
+    : textResourceOf(target.node, RECORD_KEYS.heartbeat);
+}
+
 /** The two facts a recall depends on, read from the resolver rather than inferred. */
 export type RecallPreflight = {
   /** `hasRoles(nameResourceOf(node), ROLE_SET_TEXT_ADMIN, account)` — may this wallet revoke? */
@@ -191,18 +238,27 @@ export async function recallPreflight(
   target: RecallTarget,
   account: Address,
 ): Promise<RecallPreflight> {
+  const inode = await usesInodeResolver(publicClient, target.resolver);
+  /* The admin question is asked against the same resource the revoke will be
+     judged on. On the hackathon revision there is no name-level resource to
+     hold admin over, so it is the key's — which root roles OR into, so the
+     parent's admin passes either way. */
+  const adminResource = inode
+    ? heartbeatResource(target, true)
+    : nameResourceOf(target.node);
+
   const [maySend, agentAuthorized] = await Promise.all([
     publicClient.readContract({
       address: target.resolver,
       abi: resolverAdminAbi,
       functionName: "hasRoles",
-      args: [nameResourceOf(target.node), ROLE_SET_TEXT_ADMIN, account],
+      args: [adminResource, ROLE_SET_TEXT_ADMIN, account],
     }),
     publicClient.readContract({
       address: target.resolver,
       abi: resolverAdminAbi,
       functionName: "hasRoles",
-      args: [textResourceOf(target.node, RECORD_KEYS.heartbeat), ROLE_SET_TEXT, target.agent],
+      args: [heartbeatResource(target, inode), ROLE_SET_TEXT, target.agent],
     }),
   ]);
   return { maySend, agentAuthorized };
@@ -261,18 +317,31 @@ export async function recallCapsule(
   const account = walletClient.account;
   if (account === undefined) throw new RecallError("failed", "the wallet client has no account");
 
-  const resource = textResourceOf(target.node, RECORD_KEYS.heartbeat);
+  const inode = await usesInodeResolver(publicClient, target.resolver);
+  const resource = heartbeatResource(target, inode);
 
   onPhase?.("simulating");
   let request;
   try {
-    const simulated = await publicClient.simulateContract({
-      address: target.resolver,
-      abi: resolverAdminAbi,
-      functionName: "authorizeTextRoles",
-      args: buildRecallArgs(target),
-      account: account.address,
-    });
+    /* Two deployments, two spellings of the same revoke. The hackathon revision
+       dropped `authorizeTextRoles` entirely — there is no name-scoped grant to
+       undo — so the role is cleared on the key's resource directly. Both return
+       whether anything changed, which is what the `false` check below reads. */
+    const simulated = inode
+      ? await publicClient.simulateContract({
+          address: target.resolver,
+          abi: inodeResolverAbi,
+          functionName: "revokeRoles",
+          args: [resource, ROLE_SET_TEXT, target.agent],
+          account: account.address,
+        })
+      : await publicClient.simulateContract({
+          address: target.resolver,
+          abi: resolverAdminAbi,
+          functionName: "authorizeTextRoles",
+          args: buildRecallArgs(target),
+          account: account.address,
+        });
     // `authorizeTextRoles` returns whether it changed anything. `false` means
     // the role is already gone — a transaction that would succeed and do
     // nothing. Stopping here costs the user a wallet popup and some gas.
@@ -290,7 +359,7 @@ export async function recallCapsule(
   onPhase?.("signing");
   let hash: Hex;
   try {
-    hash = await walletClient.writeContract(request);
+    hash = await walletClient.writeContract(request as never);
   } catch (error) {
     throw explain(error);
   }

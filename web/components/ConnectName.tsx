@@ -33,7 +33,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import type { Address } from "viem";
 import Capsule from "@/components/Capsule";
-import { CHAIN } from "@/lib/capsule/chain";
+import { ACTIVE, CHAIN } from "@/lib/capsule/chain";
 import {
   ConnectError,
   connectParent,
@@ -161,12 +161,18 @@ export default function ConnectName({
 
   const phase = (step: string) => (p: string, detail?: string) => setBusy({ step, detail: `${p}${detail ? ` · ${shortHex(detail)}` : ""}` });
 
+  /* The deployment the checked name actually lives on. Read off the status
+     rather than imported, so the same page connects a hackathon-registered name
+     and a beta one without the user choosing. Before a name has been checked
+     there is nothing to act on, so the active deployment is a safe stand-in. */
+  const deployment = checked?.deployment ?? ACTIVE;
+
   /* ---------------- the four actions ---------------- */
 
   const onDeployResolver = () =>
     run("Deploying resolver", async ({ walletClient, publicClient }) => {
       const { hash, resolver } = await deployResolver(
-        { walletClient, publicClient, admin: address as Address },
+        { walletClient, publicClient, admin: address as Address, deployment },
         phase("Deploying resolver"),
       );
       setFreshResolver(resolver);
@@ -189,7 +195,7 @@ export default function ConnectName({
   const onDeploySubregistry = () =>
     run("Deploying subregistry", async ({ walletClient, publicClient }) => {
       const { hash, registry } = await deploySubregistry(
-        { walletClient, publicClient, owner: address as Address },
+        { walletClient, publicClient, owner: address as Address, deployment },
         phase("Deploying subregistry"),
       );
       setFreshRegistry(registry);
@@ -213,12 +219,12 @@ export default function ConnectName({
          heard of it, which reads as nothing having happened at all. */
       if (checked.registry === null) {
         await attachSubregistry(
-          { walletClient, publicClient, tokenId: checked.tokenId, registry },
+          { walletClient, publicClient, tokenId: checked.tokenId, registry, deployment },
           phase("Linking subregistry · 1 of 2"),
         );
       }
       const hash = await linkSubregistryParent(
-        { walletClient, publicClient, registry, label: checked.parent.label },
+        { walletClient, publicClient, registry, label: checked.parent.label, deployment },
         phase("Linking subregistry · 2 of 2"),
       );
       say(`${checked.parent.name} can now issue subnames`, hash);

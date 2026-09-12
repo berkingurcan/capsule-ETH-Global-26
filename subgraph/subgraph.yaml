@@ -29,9 +29,9 @@ dataSources:
     name: CapsuleMinter
     network: sepolia
     source:
-      address: "0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51"
+      address: "0x07A30CfFe5408d2a94b5CaF44C88AeF31b2786CF"
       abi: CapsuleMinter
-      startBlock: 11669320
+      startBlock: 11687685
     mapping:
       kind: ethereum/events
       apiVersion: 0.0.9

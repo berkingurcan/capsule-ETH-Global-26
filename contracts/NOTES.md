@@ -1,28 +1,78 @@
 # Capsule — ENSv2 Sepolia notes
 
-Step 1 of the build plan: **mint one subname by hand and read it back.** Complete.
-Everything below was verified against the live Sepolia beta, not from docs.
+Everything below was verified against live contracts, not from docs.
 
-## What exists on-chain
+## TWO deployments, one chain
+
+There are two ENSv2 deployments live on Sepolia and they share nothing but the
+chain id:
+
+- **hackathon** — behind the official ENS hackathon portal, a LATER revision of
+  the contracts, and the one ENS DevRel points entrants at. **Capsule runs here.**
+- **beta** — ENS's own long-running ENSv2 beta. Where Capsule ran until the port.
+
+A name registered on one does not exist on the other. `getSubregistry("capsulefleet")`
+answers a real registry on both — because we registered the name twice, once on
+each — but they are different names holding different records, and neither
+registry can see the other's labels.
+
+The registry ABI is **identical** across the two (selector-diffed from deployed
+bytecode). The resolver ABI is **not** — see gotcha 16, which is the whole of the
+port.
+
+Capsule supports both at once and picks per name, never by configuration:
+`CapsuleMinter.connectParent` probes the resolver and stores `Parent.inode`; the
+web app detects from `ETHRegistry.findOwner`; the runner probes its own resolver
+at boot; reads try both UniversalResolvers.
+
+## What exists on-chain — hackathon deployment (LIVE)
 
 | Thing | Address / value |
 |---|---|
 | Owner wallet (burner) | `0x9e0283E37bd2f2c6bEFC29b89CF2d86fe5b5fB71` |
-| Parent name | `capsulefleet.eth` |
-| Our subregistry (`PermissionedRegistry`) | `0x4d2b9DB6b011425F12F271Fa680b0ec8c2f0cd0e` |
-| Our resolver (`PermissionedResolver` proxy) | `0x7C66eE081c5326478dCA44760f5Ab97cab8DE8C3` |
-| **`CapsuleMinter`** (ours) | `0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51` — block `11669320`, verified |
-| …its ERC-7930 registry id | `0x0001000003aa36a714e114caf799f11ed61bd44fc7d498d96db62bdf51` |
-| …superseded, single-parent | ~~`0x193Bb7dB059a6f93e796d97da278465d20224819`~~ |
-| …superseded, dotted keys | ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ |
+| Parent name | `capsulefleet.eth` — registered on the hackathon deployment, block `11687688` |
+| Our subregistry (`UserRegistry` proxy) | `0x29A54E5B2C9330cd2c295BDdBa3e43f533b58C03` |
+| Our resolver (`PermissionedResolver` proxy) | `0x857ee929aceb4e1f798a4c66b9bc55aaa51b1948` |
+| **`CapsuleMinter`** (ours) | `0x07A30CfFe5408d2a94b5CaF44C88AeF31b2786CF` — block `11687685` |
+| …its ERC-7930 registry id | `0x0001000003aa36a71407a30cffe5408d2a94b5caf44c88aef31b2786cf` |
 | Parent namehash | `0x036a91f25e11db713abf00b569adb0a03c248d7b9f291430dac6807860d4a6b3` |
 | Parent DNS encoding | `0x0c63617073756c65666c6565740365746800` |
 | Test agent EOA | `0xca266f69EE3EFed7eC71CE5062f5A07c18908905` |
-| First agent name | `trader.capsulefleet.eth` |
-| …its namehash | `0x66a9d2f8c0624c05f62f7b4767380c0ed5de24b18e2ac582cb30b03fc9483648` |
-| …its DNS-encoded name | `0x067472616465720c63617073756c65666c6565740365746800` |
+| Capsules minted | `trader`, `dev`, `marketing`, `analyst` — all `.capsulefleet.eth` |
+
+Superseded minters, all on the **beta** deployment and unreachable from the
+hackathon one:
+
+| | |
+|---|---|
+| ~~`0xE114CAf799f11Ed61Bd44Fc7d498D96Db62bDF51`~~ | multi-parent, beta |
+| ~~`0x193Bb7dB059a6f93e796d97da278465d20224819`~~ | single-parent |
+| ~~`0xe609aE1Cfb8277cE14286428Aa1D0D88A337a362`~~ | dotted keys |
+
+## ENS hackathon deployment — contracts we call
+
+| Contract | Address |
+|---|---|
+| ETHRegistrar | `0x7d1B7f586a62Ac3F54b9A396849757814283270b` |
+| ETHRegistry | `0x1D78834d97c1D7b1A38c1deDBD1a287cFEd3971e` |
+| RootRegistry | `0xe7f0D5724f8337e3Aa9A9910540341Ff4273fEd9` |
+| UniversalResolver | `0xd26f2040D083Af1cD2962ba303F4BEa0c4faf142` |
+| LabelStore | `0xd7351f76866123a7e49381f38a30a96adba7e855` |
+| VerifiableFactory | `0x894bc9cC8ff1ad96B8a288C86A8C71D662C07780` |
+| PermissionedResolverImpl | `0xa9d3814AB151BF6E37A427432795371a8361614e` |
+| **UserRegistry impl** | `0x47B442d0CF617c41CAbAFf5f02f44DD1e5f72546` — subregistries are proxies of this |
+| StandardRentPriceOracle | `0xFeba6589b5C1B35875C0389CCEDF83148B6eE71B` |
+| Test USDC (fee, **freely mintable**) | `0xcBFD80F74375c54E545AF34788Ff465F96F66F05` |
+| Test DAI (fee, freely mintable) | `0x93403a98c3A6be906585CD0D68447c0Fc600FB38` |
+| ~~PublicResolverV2~~ | `0xF9de4979DdB290baF5B760D0e788125017Bc33f6` — **do not use**, see gotcha 2 |
+
+Not published anywhere we could find — read out of the portal's own JS bundle and
+then verified on chain. The LabelStore in particular is absent from the portal's
+config object and was recovered from `UserRegistry`'s constructor arguments.
 
 ## ENSv2 Sepolia beta — contracts we call
+
+Kept because Capsule still reads names here.
 
 | Contract | Address |
 |---|---|
@@ -499,6 +549,67 @@ cast send $CAPSULE_RESOLVER 'setText(bytes32,string,string)' $NODE "agent.prompt
 
 `MintCapsules.s.sol` deliberately does not do this inside the broadcast: what to wipe is
 a judgement call, and burying it in a script makes it invisible.
+
+### 16. The hackathon resolver scopes permissions to the KEY, not the name
+
+The single most consequential difference between the two deployments, and the
+reason `Parent.inode` exists.
+
+Both resolvers are called `PermissionedResolver`. They are not the same contract:
+
+| | beta | hackathon |
+|---|---|---|
+| write a text record | `setText(bytes32 node, string, string)` | `setText(bytes name, string, string)` |
+| write an address | `setAddr(bytes32, address)` | `setAddress(bytes name, uint256 coinType, bytes)` |
+| read a text record | `text(bytes32, string)` | **absent** — ENSIP-10 `resolve()` only |
+| delegate one key | `authorizeTextRoles(name, key, account, bool)` | `grantSetterRoles(bytes setter, address)` |
+| delegate a whole name | `authorizeNameRoles(name, bitmap, account, bool)` | **absent** |
+| `grantRoles` | works | **reverts** — `grantSetterRoles` is the only path |
+
+Role BIT VALUES are identical (`ROLE_SET_ADDRESS = 1 << 0`, `ROLE_SET_TEXT = 1 << 4`,
+admin halves at `<< 128`), so `REQUIRED_RESOLVER_ROOT_ROLES` ports unchanged. What
+changed is the **resource** those roles hang off:
+
+```solidity
+// beta — one key on one name
+resource = keccak256(abi.encode(node, keccak256(key)))
+
+// hackathon — one key, EVERY name this resolver serves
+resource = keccak256(key)          // PermissionedResolverLib.resource(string)
+```
+
+The name is not in the resource. `setText` checks `resource(key)` and the `name`
+argument plays no part in the permission decision at all.
+
+**What this costs us.** Capsule delegates `agent-heartbeat` to each capsule's
+agent EOA. On the hackathon deployment that grant reaches every name under the
+same parent resolver, so agent A can write agent B's heartbeat if they share a
+parent. On the beta it could not.
+
+**What it does not cost us.** The recall is still exact. Roles are held per
+`(resource, account)` and every capsule has its own agent EOA, so revoking agent
+A removes only agent A. The over-broad half is the grant, never the revoke.
+
+`mint()` also grants the capsule owner nothing on the hackathon path, because
+there is no name-scoped grant to make: the parent's admin holds root roles and is
+the account that can edit a capsule's records. On the beta the owner gets
+`OWNER_NAME_ROLES` on their own name as before.
+
+The fix, if this were production rather than a hackathon: deploy one resolver
+proxy per capsule instead of one per parent. `initialize(Grant[], bytes[])`
+suppresses permission checks while initializing, so a single `deployProxy` could
+grant the roles and write all nine records at once — isolation restored, roughly
+150k extra gas per mint. Deliberately not done here; the shared-resolver
+behaviour above is the documented limit.
+
+### 17. `VerifiableFactory` ignores the implementation when deriving the address
+
+`deployProxy(impl, salt, data)` derives the proxy address from
+`(factory, deployer, salt)` only. Deploying a registry and a resolver from one
+wallet under the same salt is therefore a CREATE2 collision, and it surfaces as a
+revert with **empty return data** — which reads like a broken contract rather
+than a reused number. `/connect` uses salt `0` for the resolver and `1` for the
+registry for exactly this reason.
 
 ## Next
 

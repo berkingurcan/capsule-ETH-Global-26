@@ -436,7 +436,7 @@ contract CapsuleMinterTest is Test {
     }
 
     function test_connectParent_storesTheDerivedNode() public view {
-        (bool connected, bool open, IPermissionedResolver res, bytes32 node, bytes memory dns) =
+        (bool connected, bool open, IPermissionedResolver res, bytes32 node, bytes memory dns,) =
             minter.parentOf(_reg());
         assertTrue(connected);
         assertTrue(open);
@@ -527,7 +527,7 @@ contract CapsuleMinterTest is Test {
     function test_setParentOpen_flipsAccess() public {
         vm.prank(PARENT_ADMIN);
         minter.setParentOpen(_reg(), false);
-        (, bool open,,,) = minter.parentOf(_reg());
+        (, bool open,,,,) = minter.parentOf(_reg());
         assertFalse(open);
     }
 
@@ -544,7 +544,7 @@ contract CapsuleMinterTest is Test {
     function test_disconnectParent_stopsFurtherMints() public {
         vm.prank(PARENT_ADMIN);
         minter.disconnectParent(_reg());
-        (bool connected,,,,) = minter.parentOf(_reg());
+        (bool connected,,,,,) = minter.parentOf(_reg());
         assertFalse(connected);
         vm.expectRevert(
             abi.encodeWithSelector(CapsuleMinter.ParentNotConnected.selector, address(registry))

@@ -63,17 +63,16 @@ import {
 } from "viem";
 import {
   ALL_ROLES,
-  ETH_REGISTRY,
-  LABEL_STORE,
-  PERMISSIONED_RESOLVER_IMPL,
   ROLE_REGISTRAR,
-  VERIFIABLE_FACTORY,
   minterAbi,
   registryAbi,
   registryDeployAbi,
   resolverAdminAbi,
   resolverInitAbi,
+  resolverInitAbiV2,
+  userRegistryInitAbi,
   verifiableFactoryAbi,
+  type DeploymentAddresses,
 } from "./chain";
 import type { ParentName } from "./parent";
 
@@ -206,11 +205,41 @@ async function send(args: SendArgs, onPhase?: OnPhase): Promise<{ hash: Hex; log
  * theirs if they never finish connecting.
  */
 export async function deploySubregistry(
-  args: { walletClient: WalletClient; publicClient: PublicClient; owner: Address },
+  args: {
+    walletClient: WalletClient;
+    publicClient: PublicClient;
+    owner: Address;
+    deployment: DeploymentAddresses;
+  },
   onPhase?: OnPhase,
 ): Promise<{ hash: Hex; registry: Address }> {
   const account = args.walletClient.account;
   if (account === undefined) throw new ConnectError("failed", "the wallet client has no account");
+
+  // The hackathon deployment has a `UserRegistry` implementation, so a
+  // subregistry there is a proxy rather than a whole contract: one `deployProxy`
+  // instead of five million gas of creation code, and the 31KB bytecode chunk
+  // never loads. The beta has no such implementation, which is the only reason
+  // that constant exists at all.
+  if (args.deployment.userRegistryImpl !== undefined) {
+    const initData = encodeFunctionData({
+      abi: userRegistryInitAbi,
+      functionName: "initialize",
+      args: [[{ account: args.owner, roleBitmap: ALL_ROLES }]],
+    });
+    const { hash, resolver: registry } = await deployProxyVia(
+      {
+        walletClient: args.walletClient,
+        publicClient: args.publicClient,
+        deployment: args.deployment,
+        implementation: args.deployment.userRegistryImpl,
+        salt: REGISTRY_SALT,
+        initData,
+      },
+      onPhase,
+    );
+    return { hash, registry };
+  }
 
   onPhase?.("simulating");
   const { PERMISSIONED_REGISTRY_BYTECODE } = await import("./registry-bytecode");
@@ -221,7 +250,7 @@ export async function deploySubregistry(
     hash = await args.walletClient.deployContract({
       abi: registryDeployAbi,
       bytecode: PERMISSIONED_REGISTRY_BYTECODE,
-      args: [LABEL_STORE, args.owner, ALL_ROLES],
+      args: [args.deployment.labelStore, args.owner, ALL_ROLES],
       account,
       chain: args.walletClient.chain,
     } as never);
@@ -264,6 +293,7 @@ export async function attachSubregistry(
     publicClient: PublicClient;
     tokenId: bigint;
     registry: Address;
+    deployment: DeploymentAddresses;
   },
   onPhase?: OnPhase,
 ): Promise<Hex> {
@@ -271,7 +301,7 @@ export async function attachSubregistry(
     {
       walletClient: args.walletClient,
       publicClient: args.publicClient,
-      address: ETH_REGISTRY,
+      address: args.deployment.ethRegistry,
       abi: registryAbi,
       functionName: "setSubregistry",
       args: [args.tokenId, args.registry],
@@ -300,6 +330,7 @@ export async function linkSubregistryParent(
     publicClient: PublicClient;
     registry: Address;
     label: string;
+    deployment: DeploymentAddresses;
   },
   onPhase?: OnPhase,
 ): Promise<Hex> {
@@ -310,7 +341,7 @@ export async function linkSubregistryParent(
       address: args.registry,
       abi: registryAbi,
       functionName: "setParent",
-      args: [ETH_REGISTRY, args.label],
+      args: [args.deployment.ethRegistry, args.label],
     },
     onPhase,
   );
@@ -335,24 +366,37 @@ export async function linkSubregistryParent(
  */
 export const RESOLVER_SALT = 0n;
 
-export async function deployResolver(
-  args: { walletClient: WalletClient; publicClient: PublicClient; admin: Address },
+/**
+ * The registry's salt, and it MUST differ from the resolver's.
+ *
+ * `VerifiableFactory` derives the proxy address from `(factory, deployer, salt)`
+ * and ignores the implementation entirely, so deploying a registry and a
+ * resolver from one wallet under the same salt is a CREATE2 collision — the
+ * second transaction reverts with no reason data, which reads like a broken
+ * contract rather than a reused number.
+ */
+export const REGISTRY_SALT = 1n;
+
+async function deployProxyVia(
+  args: {
+    walletClient: WalletClient;
+    publicClient: PublicClient;
+    deployment: DeploymentAddresses;
+    implementation: Address;
+    salt: bigint;
+    initData: Hex;
+  },
   onPhase?: OnPhase,
 ): Promise<{ hash: Hex; resolver: Address }> {
-  const initData = encodeFunctionData({
-    abi: resolverInitAbi,
-    functionName: "initialize",
-    args: [args.admin, ALL_ROLES, []],
-  });
-
+  const factory = args.deployment.verifiableFactory;
   const { hash, logs } = await send(
     {
       walletClient: args.walletClient,
       publicClient: args.publicClient,
-      address: VERIFIABLE_FACTORY,
+      address: factory,
       abi: verifiableFactoryAbi,
       functionName: "deployProxy",
-      args: [PERMISSIONED_RESOLVER_IMPL, RESOLVER_SALT, initData],
+      args: [args.implementation, args.salt, args.initData],
     },
     onPhase,
   );
@@ -360,19 +404,54 @@ export async function deployResolver(
   // Read from the event, not from the simulation's return value. The address is
   // deterministic and the simulation would answer correctly — but a value read
   // off the mined receipt is the one that exists, and a deploy that emitted no
-  // ProxyDeployed is not a resolver whatever the return data said.
+  // ProxyDeployed is not a contract whatever the return data said.
   const events = parseEventLogs({
     abi: verifiableFactoryAbi,
     eventName: "ProxyDeployed",
     logs: logs as never,
   });
-  const event = events.find(
-    (e) => e.address.toLowerCase() === VERIFIABLE_FACTORY.toLowerCase(),
-  );
+  const event = events.find((e) => e.address.toLowerCase() === factory.toLowerCase());
   if (event === undefined) {
     throw new ConnectError("failed", "the transaction succeeded but emitted no ProxyDeployed event");
   }
   return { hash, resolver: event.args.proxyAddress };
+}
+
+export async function deployResolver(
+  args: {
+    walletClient: WalletClient;
+    publicClient: PublicClient;
+    admin: Address;
+    deployment: DeploymentAddresses;
+  },
+  onPhase?: OnPhase,
+): Promise<{ hash: Hex; resolver: Address }> {
+  // The two deployments disagree on `initialize`: the beta takes one admin and
+  // one bitmap, the hackathon revision takes a list of grants and a list of
+  // calls to multicall during initialization.
+  const initData = args.deployment.inodeResolver
+    ? encodeFunctionData({
+        abi: resolverInitAbiV2,
+        functionName: "initialize",
+        args: [[{ account: args.admin, roleBitmap: ALL_ROLES }], []],
+      })
+    : encodeFunctionData({
+        abi: resolverInitAbi,
+        functionName: "initialize",
+        args: [args.admin, ALL_ROLES, []],
+      });
+
+  return deployProxyVia(
+    {
+      walletClient: args.walletClient,
+      publicClient: args.publicClient,
+      deployment: args.deployment,
+      implementation: args.deployment.permissionedResolverImpl,
+      salt: RESOLVER_SALT,
+      initData,
+    },
+    onPhase,
+  );
 }
 
 /** Grants the minter `ROLE_REGISTRAR` on the parent's registry. */

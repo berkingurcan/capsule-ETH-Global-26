@@ -32,7 +32,7 @@ import type { CapsuleConfig } from "./config.js";
 import { HEARTBEAT_KEY, heartbeatValue } from "./records.js";
 
 export { heartbeatValue } from "./records.js";
-import { resolverAbi } from "./resolve.js";
+import { inodeResolverAbi, resolverAbi } from "./resolve.js";
 
 /** Sepolia blocks land in ~12s; well past that means something is wrong. */
 const RECEIPT_TIMEOUT_MS = 90_000;
@@ -136,6 +136,21 @@ export async function probeHeartbeat(args: {
 }): Promise<void> {
   const { publicClient, config, agent, sequence } = args;
 
+  /* The two ENSv2 deployments take different arguments for this same write —
+     a namehash on the beta, the DNS wire name on the hackathon revision — and
+     the selectors differ, so there is no single shape that works on both.
+     `config.inode` was probed at boot exactly so this costs no extra call. */
+  if (config.inode) {
+    await publicClient.simulateContract({
+      address: config.resolver,
+      abi: inodeResolverAbi,
+      functionName: "setText",
+      args: [config.dnsName, HEARTBEAT_KEY, heartbeatValue(sequence)],
+      account: agent,
+    });
+    return;
+  }
+
   await publicClient.simulateContract({
     address: config.resolver,
     abi: resolverAbi,
@@ -173,15 +188,26 @@ export async function writeHeartbeat(args: WriteHeartbeatArgs): Promise<Heartbea
 
   // The address comes from the name, never from a constant: in production each
   // owner has their own resolver proxy, deployed by VerifiableFactory.
-  const { request } = await publicClient.simulateContract({
-    address: config.resolver,
-    abi: resolverAbi,
-    functionName: "setText",
-    args: [config.node, HEARTBEAT_KEY, value],
-    account: walletClient.account,
-  });
+  const { request } = config.inode
+    ? await publicClient.simulateContract({
+        address: config.resolver,
+        abi: inodeResolverAbi,
+        functionName: "setText",
+        args: [config.dnsName, HEARTBEAT_KEY, value],
+        account: walletClient.account,
+      })
+    : await publicClient.simulateContract({
+        address: config.resolver,
+        abi: resolverAbi,
+        functionName: "setText",
+        args: [config.node, HEARTBEAT_KEY, value],
+        account: walletClient.account,
+      });
 
-  const hash = await walletClient.writeContract(request);
+  // `request` is a union of the two resolvers' shapes and viem's overloads
+  // cannot narrow it; the simulation above already type-checked whichever branch
+  // produced it.
+  const hash = await walletClient.writeContract(request as never);
 
   const receipt = await publicClient.waitForTransactionReceipt({
     hash,

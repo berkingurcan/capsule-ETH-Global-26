@@ -18,7 +18,7 @@ import {
   type PublicClient,
 } from "viem";
 import { namehash, normalize, packetToBytes } from "viem/ens";
-import { UNIVERSAL_RESOLVER_V2 } from "./chain.js";
+import { UNIVERSAL_RESOLVERS } from "./chain.js";
 
 export const universalResolverAbi = parseAbi([
   // The errors matter as much as the function. Without them viem cannot name
@@ -45,6 +45,48 @@ export const resolverAbi = parseAbi([
   // resource whatever key you were actually denied on.
   "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
 ]);
+
+/**
+ * The same writes against the ENS hackathon deployment's resolver, which
+ * addresses records by DNS wire name instead of namehash.
+ *
+ * Two ENSv2 deployments are live on Sepolia and a capsule's parent may sit on
+ * either. Reads are unaffected — both answer ENSIP-10 `resolve()`, which is what
+ * this file uses for everything it reads — but the heartbeat is a WRITE, and
+ * `setText(bytes32,...)` simply does not exist on the later revision. Calling it
+ * there is not a revert with a reason; it is a different selector, and the agent
+ * silently never beats.
+ */
+export const inodeResolverAbi = parseAbi([
+  "error EACUnauthorizedAccountRoles(uint256 resource, uint256 roleBitmap, address account)",
+  "function setText(bytes name, string key, string value)",
+  "function getRecordCount() view returns (uint256)",
+  "function hasRoles(uint256 resource, uint256 roleBitmap, address account) view returns (bool)",
+]);
+
+/**
+ * Which resolver revision this capsule's name is served by.
+ *
+ * Probed rather than configured, and probed the same way `CapsuleMinter` does
+ * it: `getRecordCount()` exists only on the hackathon revision, so an answer
+ * identifies it and a revert means the beta. One call at boot, and the runner
+ * then knows which selector its heartbeat has to use for the rest of its life.
+ */
+export async function detectInodeResolver(
+  client: PublicClient,
+  resolver: Address,
+): Promise<boolean> {
+  try {
+    await client.readContract({
+      address: resolver,
+      abi: inodeResolverAbi,
+      functionName: "getRecordCount",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * text() with nothing behind it answers with an ABI-encoded empty string, which
@@ -84,6 +126,65 @@ export function encodeName(name: string): NameEncoding {
   };
 }
 
+/**
+ * `resolve()` against whichever deployment knows this name.
+ *
+ * A name absent from a deployment reverts rather than answering empty, so a
+ * revert here is not necessarily an error — it is how "ask the other one" is
+ * spelled. Only once every deployment has refused is the failure real, and the
+ * first refusal is the one rethrown because that is the deployment the caller
+ * expected to serve the name.
+ */
+export async function resolveAnywhere(
+  client: PublicClient,
+  dnsName: Hex,
+  data: Hex,
+): Promise<readonly [Hex, Address]> {
+  let first: unknown;
+  for (const address of UNIVERSAL_RESOLVERS) {
+    try {
+      return await client.readContract({
+        address,
+        abi: universalResolverAbi,
+        functionName: "resolve",
+        args: [dnsName, data],
+      });
+    } catch (error) {
+      first ??= error;
+    }
+  }
+  throw first;
+}
+
+/**
+ * Which UniversalResolver actually serves this name.
+ *
+ * `loadConfig` batches five reads into one multicall, and a multicall is pinned
+ * to a single address — so the fallback has to be resolved to one answer BEFORE
+ * the batch rather than per call inside it.
+ */
+export async function universalResolverFor(
+  client: PublicClient,
+  dnsName: Hex,
+  probe: Hex,
+): Promise<Address> {
+  let first: unknown;
+  for (const address of UNIVERSAL_RESOLVERS) {
+    try {
+      await client.readContract({
+        address,
+        abi: universalResolverAbi,
+        functionName: "resolve",
+        args: [dnsName, probe],
+      });
+      return address;
+    } catch (error) {
+      first ??= error;
+    }
+  }
+  throw first;
+}
+
 export type AddrRecord = {
   /** zeroAddress when the name publishes no address. */
   address: Address;
@@ -103,12 +204,7 @@ export async function readAddr(client: PublicClient, name: string): Promise<Addr
 
   const data = encodeFunctionData({ abi: resolverAbi, functionName: "addr", args: [node] });
 
-  const [result, resolver] = await client.readContract({
-    address: UNIVERSAL_RESOLVER_V2,
-    abi: universalResolverAbi,
-    functionName: "resolve",
-    args: [dnsName, data],
-  });
+  const [result, resolver] = await resolveAnywhere(client, dnsName, data);
 
   const address =
     result === "0x"
@@ -147,12 +243,7 @@ export async function readText(
     args: [node, key],
   });
 
-  const [result, resolver] = await client.readContract({
-    address: UNIVERSAL_RESOLVER_V2,
-    abi: universalResolverAbi,
-    functionName: "resolve",
-    args: [dnsName, data],
-  });
+  const [result, resolver] = await resolveAnywhere(client, dnsName, data);
 
   // `result` is text()'s return value, still ABI-encoded — resolve() passes it
   // through untouched.

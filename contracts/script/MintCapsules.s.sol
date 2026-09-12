@@ -57,7 +57,7 @@ contract MintCapsules is Script {
         // resolver comes from the minter's own record of this parent rather than from the
         // environment: `ConnectParent.s.sol` stored it, and a second copy in a `.env`
         // would be a second thing to keep in step.
-        (bool connected,, IPermissionedResolver resolver,,) = s.minter.parentOf(s.registry);
+        (bool connected,, IPermissionedResolver resolver,,,) = s.minter.parentOf(s.registry);
         require(connected, "run ConnectParent.s.sol for this registry first");
         s.minter.checkResolverRoles(resolver);
 
