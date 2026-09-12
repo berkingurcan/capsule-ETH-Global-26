@@ -136,6 +136,11 @@ h4 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
 .b-blue .lede, .b-ink .lede { color: var(--vend-100); }
 
 .mono { font-family: var(--az); }
+
+/* A long identifier set inline — PermissionedResolver, CapsuleMinter — is one
+   unbreakable token, and on a narrow phone it pushes the whole page sideways.
+   Let it break; nothing else about how it reads changes. */
+code { overflow-wrap: anywhere; }
 .hint { font-size: 13px; color: var(--muted); line-height: 1.5; }
 .sec-head { margin-bottom: 36px; }
 
@@ -169,8 +174,8 @@ h4 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; margin: 0; }
   color: var(--shell);
   border-bottom: var(--out);
 }
-.nav-inner { display: flex; align-items: center; gap: 26px; height: var(--nav-h); }
-.brand { display: flex; align-items: center; gap: 11px; }
+.nav-inner { display: flex; align-items: center; gap: 26px; height: var(--nav-h); min-width: 0; }
+.brand { display: flex; align-items: center; gap: 11px; flex: none; }
 .brand .wm { font-size: 21px; color: var(--shell); }
 .nav-links { display: flex; align-items: center; gap: 4px; margin-left: 10px; }
 .nav-link {
@@ -525,6 +530,26 @@ td.m, th.m { font-family: var(--az); font-size: 12.5px; font-weight: 500; }
   overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
 }
 
+/* ---------- reveal-on-scroll ----------
+   components/Reveal.tsx adds `reveal` from JS, and only once it has checked the
+   block is still below the fold — so the hidden state never exists in a page
+   that ships without JS, and nothing already on screen flickers. `in` lands when
+   it scrolls into view. Direct children stagger. */
+.reveal > * {
+  opacity: 0;
+  transform: translateY(22px);
+  transition: opacity 0.62s cubic-bezier(0.22, 0.61, 0.36, 1),
+    transform 0.62s cubic-bezier(0.22, 0.61, 0.36, 1);
+}
+.reveal.in > * { opacity: 1; transform: none; }
+.reveal.in > *:nth-child(2) { transition-delay: 0.09s; }
+.reveal.in > *:nth-child(3) { transition-delay: 0.18s; }
+.reveal.in > *:nth-child(4) { transition-delay: 0.27s; }
+
+@media (prefers-reduced-motion: reduce) {
+  .reveal > * { opacity: 1; transform: none; transition: none; }
+}
+
 /* ---------- responsive ---------- */
 
 @media (max-width: 1024px) {
@@ -561,8 +586,18 @@ td.m, th.m { font-family: var(--az); font-size: 12.5px; font-weight: 500; }
   .hero { grid-template-columns: minmax(0, 1.25fr) minmax(0, 0.75fr); gap: 56px; }
 }
 
-/* the demo marker crowds the bar on a phone */
+/* The chain marker and the wallet's chain label both crowd the bar on a phone:
+   brand + chip + Connect wallet is wider than a 414px screen, which used to push
+   the whole page sideways. The chip is a nicety, the wallet control is not, so
+   the chip goes first. (This rule read `.nav .tag.sun` for a long time and so
+   never matched anything — Nav renders a plain `tag`.) */
 @media (max-width: 620px) {
-  .nav .tag.sun { display: none; }
+  .nav .tag { display: none; }
   .wallet span:last-child { display: none; }
+  /* the wrong-chain state adds a second button; give it room rather than
+     letting the one control that fixes the problem get clipped */
+  .brand .wm { font-size: 18px; }
+  .brand svg { width: 26px; height: 26px; }
+  .nav .btn-danger.btn-sm { font-size: 11.5px; padding: 6px 11px; }
+  .wallet { padding: 5px 11px 5px 9px; }
 }

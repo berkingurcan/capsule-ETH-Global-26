@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import Nav from "@/components/Nav";
+import Reveal from "@/components/Reveal";
 import { WalletProvider } from "@/lib/wallet/WalletProvider";
 import "./globals.css";
 
@@ -26,14 +27,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           {children}
         </WalletProvider>
         <footer className="b-ink" style={{ padding: "34px 0", borderTop: "3px solid var(--ink)" }}>
-          <div className="wrap row wrapflex" style={{ gap: 16 }}>
+          <Reveal className="wrap row wrapflex" style={{ gap: 16 }}>
             <span className="mono" style={{ fontSize: 12, color: "var(--vend-300)" }}>
               Capsule · ETHOnline 2026 · design demo
             </span>
             <span className="push mono" style={{ fontSize: 12, color: "var(--vend-300)" }}>
               Names, roles and heartbeats · all on ETH Sepolia
             </span>
-          </div>
+          </Reveal>
         </footer>
       </body>
     </html>
