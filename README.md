@@ -33,6 +33,7 @@ https://capsule-ens.vercel.app/
 | `web/` | Next.js frontend & backend — launchpad + fleet dashboard |
 | `runner/` | Agent process — resolves its ENS name, heartbeats, halts on revoke. 2 Layers: OpenClaw AI and Supervisor |
 | `contracts/` | Solidity: CapsuleMinter, resolver, roles |
+| `subgraph/` | The Graph — mints, records, roles and heartbeats in one index. Agent guide: [`subgraph/SKILL.md`](subgraph/SKILL.md) |
 
 ## Key Features
 

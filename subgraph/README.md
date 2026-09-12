@@ -76,6 +76,7 @@ src/minter.ts           mints, parents, resolver discovery
 src/resolver.ts         records, heartbeats, role changes — the join
 tests/records.test.ts   the three derivations that fail silently
 abis/                   hand-written, events only — no eth_call surface we do not use
+SKILL.md                agent guide: how to query this index and what not to guess
 ```
 
 `src/records.ts` is the **fourth** copy of the record-key table (the others are
