@@ -3,17 +3,25 @@
 /* ------------------------------------------------------------------
    Bring your own name.
 
-   Six checks, six buttons, in the order the chain requires them. The page is
-   deliberately a checklist rather than a wizard: every row is a fact read off
-   Sepolia, and the button next to a row is the transaction that makes that fact
-   true. Reload it at any point and it shows where you actually are, because it
-   never remembers anything — `readParentStatus` is the only source of truth on
-   the screen.
+   One button, over a checklist of facts read off Sepolia. The checklist came
+   first and is still the truth on the screen: every row is a fact, nothing is
+   remembered, and reloading shows where you actually are because
+   `readParentStatus` is the only thing the page believes.
 
-   That matters more here than on the launch form. Connecting is up to six
-   transactions from a wallet that may be interrupted between any two of them,
-   and a wizard holding step state in React would happily ask someone to deploy a
-   second resolver because it forgot they had one.
+   What changed is who pushes the buttons. Six rows in chain-dependency order is
+   an honest description of the problem and a bad thing to hand someone who has
+   never heard of a subregistry — so `runConnect` walks the list instead, doing
+   the first missing step, re-reading, and repeating. The per-row buttons are
+   still here behind "step through manually", because when something goes wrong
+   mid-flow the ability to take one step at a time is the whole reason the page
+   was built this way.
+
+   Re-reading between steps rather than following a plan is what makes that safe.
+   A wizard holding step state in React would happily ask someone to deploy a
+   second resolver because it forgot they had one — and since both deployments
+   land on deterministic CREATE2 addresses, that second deploy does not waste
+   money, it reverts with no reason data. `runConnect` looks for the contracts at
+   their predicted addresses before it offers to deploy anything.
 
    The first two steps are the subregistry, and they used to be an apology. A
    `.eth` name on this deployment has none, nothing can create a subname under it
@@ -43,7 +51,10 @@ import {
   linkSubregistryParent,
   grantRegistrar,
   grantResolverRoles,
+  minterHasResolverRoles,
+  runConnect,
   setParentOpen,
+  supportsBatching,
 } from "@/lib/capsule/connect";
 import {
   encodeParent,
@@ -78,13 +89,31 @@ export default function ConnectName({
   const [freshResolver, setFreshResolver] = useState<Address | null>(null);
   /* The registry deployed in this session, before ENS has been told about it.
 
-     Unlike the resolver, whose address is deterministic in (factory, wallet,
-     salt) and so can be recovered by redeploying, a registry is a plain CREATE
-     deployment: its address depends on the sender's nonce and is gone the moment
-     this state is. That is five million gas at stake, which is why the field
-     below is editable — a reloaded user can paste the address from their wallet
-     history instead of paying twice. */
+     On the beta deployment a registry is a plain CREATE deployment: its address
+     depends on the sender's nonce and is gone the moment this state is, which is
+     why the field below is editable — five million gas is at stake and a reloaded
+     user can paste the address from their wallet history instead of paying twice.
+
+     On the active deployment it is a `VerifiableFactory` proxy, so the address is
+     deterministic in (factory, wallet, salt) and `runConnect` finds it by looking
+     rather than by being told. The field stays for the other deployment. */
   const [freshRegistry, setFreshRegistry] = useState<Address | null>(null);
+  /* Step-through mode. Off by default: the one button is the flow, and the six
+     per-row transactions are the escape hatch for when it stops halfway. */
+  const [manual, setManual] = useState(false);
+  /* Whether this wallet will take the whole sequence under one confirmation
+     (EIP-5792). Only used to set expectations before anybody clicks — the
+     decision itself is made again inside `runConnect`, against the wallet. */
+  const [batchable, setBatchable] = useState(false);
+  /* Does the minter already hold its roles on the resolver we would use?
+
+     Not a field of `ParentStatus`, and it cannot be: `readiness` derives
+     `resolverRolesGranted` from `parent.resolver`, which is zero until
+     `connectParent` has run. So a resolver deployed with the grants baked into
+     its `initialize` reads as ungranted right up to the final step, and the row
+     would offer a redundant grant. Asked of the minter's own view function
+     instead, against the resolver this page would actually use. */
+  const [resolverRoles, setResolverRoles] = useState<boolean | null>(null);
 
   const problems = raw.trim() === "" ? [] : parentNameProblems(raw);
   const nameOk = raw.trim() !== "" && problems.length === 0;
@@ -136,6 +165,25 @@ export default function ConnectName({
     void refresh();
   }, [initialName, connected, chainOk, minter, refresh]);
 
+  /* Ask the wallet once whether it speaks EIP-5792, so the button can say what
+     will happen before it happens. `runConnect` asks again for itself — this is a
+     label, not a decision. */
+  useEffect(() => {
+    if (!connected || !chainOk) {
+      setBatchable(false);
+      return;
+    }
+    const walletClient = getWalletClient();
+    if (walletClient === null) return;
+    let live = true;
+    void supportsBatching(walletClient, address as Address, CHAIN.id).then((ok) => {
+      if (live) setBatchable(ok);
+    });
+    return () => {
+      live = false;
+    };
+  }, [connected, chainOk, address, getWalletClient]);
+
   const run = useCallback(
     async (label: string, fn: (clients: { walletClient: never; publicClient: never }) => Promise<void>) => {
       const walletClient = getWalletClient();
@@ -167,12 +215,57 @@ export default function ConnectName({
      there is nothing to act on, so the active deployment is a safe stand-in. */
   const deployment = checked?.deployment ?? ACTIVE;
 
-  /* ---------------- the four actions ---------------- */
+  /* ---------------- the one button ----------------
+
+     Everything below it still exists and is still reachable; this is the loop
+     that pushes them in order. It owns no step state — `runConnect` re-reads the
+     chain between every transaction — so stopping it halfway and clicking it
+     again resumes, and so does reloading the page and clicking it again. */
+  const onConnectAll = () =>
+    run("Connecting", async ({ walletClient, publicClient }) => {
+      const status = await runConnect(
+        {
+          walletClient,
+          publicClient,
+          account: address as Address,
+          minter: minter as Address,
+          parent: encodeParent(raw),
+          open,
+          knownRegistry: freshRegistry,
+          knownResolver: freshResolver,
+          onRegistry: setFreshRegistry,
+          onResolver: setFreshResolver,
+        },
+        (event) => {
+          if (event.done !== undefined) {
+            say(event.done, event.tx);
+            return;
+          }
+          setBusy({
+            step: event.step,
+            detail:
+              event.phase === undefined
+                ? undefined
+                : `${event.phase}${event.detail === undefined ? "" : ` · ${shortHex(event.detail as never)}`}`,
+          });
+        },
+      );
+      setChecked(status);
+      setOpen(status.open);
+    });
+
+  /* ---------------- the steps, one at a time ---------------- */
 
   const onDeployResolver = () =>
     run("Deploying resolver", async ({ walletClient, publicClient }) => {
       const { hash, resolver } = await deployResolver(
-        { walletClient, publicClient, admin: address as Address, deployment },
+        {
+          walletClient,
+          publicClient,
+          admin: address as Address,
+          deployment,
+          minter: minter as Address,
+        },
         phase("Deploying resolver"),
       );
       setFreshResolver(resolver);
@@ -195,7 +288,13 @@ export default function ConnectName({
   const onDeploySubregistry = () =>
     run("Deploying subregistry", async ({ walletClient, publicClient }) => {
       const { hash, registry } = await deploySubregistry(
-        { walletClient, publicClient, owner: address as Address, deployment },
+        {
+          walletClient,
+          publicClient,
+          owner: address as Address,
+          deployment,
+          minter: minter as Address,
+        },
         phase("Deploying subregistry"),
       );
       setFreshRegistry(registry);
@@ -329,6 +428,35 @@ export default function ConnectName({
   const resolverToUse: Address | null = storedResolver ?? freshResolver;
   const hasResolver = resolverToUse !== null && resolverToUse !== zero;
 
+  /* Whether the minter can already write records through the resolver in play.
+
+     `readiness` cannot say so before `connectParent` — see `resolverRoles` above —
+     and since the resolver is now deployed with those roles granted in its
+     `initialize`, believing `readiness` here would show a "no" next to a resolver
+     that has been ready since the moment it existed. */
+  useEffect(() => {
+    if (!connected || minter === null || resolverToUse === null) {
+      setResolverRoles(null);
+      return;
+    }
+    const publicClient = getPublicClient();
+    if (publicClient === null) return;
+    let live = true;
+    void minterHasResolverRoles(publicClient, minter as Address, resolverToUse).then((ok) => {
+      if (live) setResolverRoles(ok);
+    });
+    return () => {
+      live = false;
+    };
+  }, [connected, minter, resolverToUse, checked, getPublicClient]);
+
+  /* The grant row is satisfied by either source: the minter's stored parent (once
+     connected) or the resolver itself (before that). */
+  const resolverRolesOk = checked?.resolverRolesGranted === true || resolverRoles === true;
+
+  /** Is there anything left for the one button to do? */
+  const allDone = checked !== null && checked.callerMayMint;
+
   return (
     <div className="stack" style={{ gap: 22 }}>
       <div className="panel pad-lg">
@@ -454,6 +582,50 @@ export default function ConnectName({
             </div>
           ) : (
           <>
+          {/* --- the one button, and the escape hatch next to it ---
+
+               `callerMayMint` is the whole of "is this name usable", so it is also
+               the whole of "is there anything left to do". When it is false the
+               button runs every remaining step; when it is true there is nothing
+               to run and the panel below is a receipt. */}
+          {!allDone && checked.callerMaySetSubregistry !== false && (
+            <div className="tile" style={{ marginTop: 14 }}>
+              <div className="spread" style={{ alignItems: "flex-start", gap: 16 }}>
+                <div style={{ minWidth: 0 }}>
+                  <strong>Connect {checked.parent.name}</strong>
+                  <p className="hint" style={{ marginTop: 6, maxWidth: "62ch" }}>
+                    {batchable
+                      ? "Your wallet can take the whole sequence under one confirmation, so this is one signature. Everything it grants is revocable, and the registry and resolver it deploys are yours."
+                      : "Each step is its own transaction, so your wallet will ask a few times in a row. Stop whenever you like — the page reads the chain, not its own memory, so clicking again picks up exactly where you left off."}
+                  </p>
+                </div>
+                <span className="push">
+                  <button
+                    className="btn btn-primary"
+                    onClick={onConnectAll}
+                    disabled={busy !== null || reading}
+                  >
+                    {busy !== null ? "Working…" : batchable ? "Connect (1 signature)" : "Connect this name"}
+                  </button>
+                </span>
+              </div>
+              <div className="row" style={{ gap: 10, marginTop: 12 }}>
+                <button
+                  className="btn btn-sm btn-ghost"
+                  onClick={() => setManual((value) => !value)}
+                  disabled={busy !== null}
+                >
+                  {manual ? "Hide the individual steps" : "Step through manually"}
+                </button>
+                <span className="hint">
+                  {manual
+                    ? "Every row below is one transaction, in the order the chain requires."
+                    : "Below is what it will do, read off Sepolia."}
+                </span>
+              </div>
+            </div>
+          )}
+
           {/* --- 1. the subregistry: deploy it, then link it both ways --- */}
           <Row
             done={deployedRegistry}
@@ -464,7 +636,7 @@ export default function ConnectName({
                 : "a name on this deployment gets none by default"
             }
           >
-            {!deployedRegistry && mayFixSubregistry && (
+            {manual && !deployedRegistry && mayFixSubregistry && (
               <button
                 className="btn btn-sm btn-primary"
                 onClick={onDeploySubregistry}
@@ -481,13 +653,15 @@ export default function ConnectName({
               title="Linked to the name"
               detail="ENS has to agree in both directions before subnames work"
             >
-              <button
-                className="btn btn-sm btn-primary"
-                onClick={onLinkSubregistry}
-                disabled={busy !== null}
-              >
-                {checked.registry === null ? "Link it (2 signatures)" : "Finish linking"}
-              </button>
+              {manual && (
+                <button
+                  className="btn btn-sm btn-primary"
+                  onClick={onLinkSubregistry}
+                  disabled={busy !== null}
+                >
+                  {checked.registry === null ? "Link it (2 signatures)" : "Finish linking"}
+                </button>
+              )}
             </Row>
           )}
 
@@ -518,7 +692,9 @@ export default function ConnectName({
               <p className="hint" style={{ marginTop: 8 }}>
                 {deployedRegistry
                   ? "The contract is already deployed. What is left is the link itself, which is cheap."
-                  : "The deployment is the expensive part of connecting — roughly five million gas, once, ever."}
+                  : deployment.userRegistryImpl === undefined
+                    ? "The deployment is the expensive part of connecting — roughly five million gas, once, ever."
+                    : "On this deployment the registry is a proxy, so it is an ordinary transaction rather than the five million gas a whole contract would cost."}
               </p>
               {deployedRegistry && checked.registry === null && (
                 <label className="field" style={{ marginTop: 10 }}>
@@ -555,7 +731,7 @@ export default function ConnectName({
                     : "ENSv2 names need one of these before records can be authorized"
                 }
               >
-                {!hasResolver && (
+                {manual && !hasResolver && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy !== null || !checked.callerIsAdmin}
@@ -566,7 +742,7 @@ export default function ConnectName({
                 )}
               </Row>
 
-              {!storedResolver && (
+              {manual && !storedResolver && (
                 <details style={{ marginTop: 8 }}>
                   <summary className="hint" style={{ cursor: "pointer" }}>
                     I already have a resolver for this name
@@ -596,7 +772,7 @@ export default function ConnectName({
                 title="Capsule may register subnames"
                 detail="ROLE_REGISTRAR on your registry — revoke it and Capsule can never mint here again"
               >
-                {!checked.registrarGranted && (
+                {manual && !checked.registrarGranted && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy !== null || !checked.callerIsAdmin}
@@ -608,11 +784,15 @@ export default function ConnectName({
               </Row>
 
               <Row
-                done={checked.resolverRolesGranted}
+                done={resolverRolesOk}
                 title="Capsule may write records"
-                detail="four root roles on your resolver — the same ones it uses to hand you the kill switch"
+                detail={
+                  resolverRolesOk
+                    ? "four root roles on your resolver — revoke them and Capsule can never write under this name again"
+                    : "four root roles on your resolver — the same ones it uses to hand you the kill switch"
+                }
               >
-                {!checked.resolverRolesGranted && (
+                {manual && !resolverRolesOk && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy !== null || !hasResolver || !checked.callerIsAdmin}
@@ -633,7 +813,7 @@ export default function ConnectName({
                     : "stores your resolver against your registry so mint() takes only a registry"
                 }
               >
-                {!checked.connected && (
+                {manual && !checked.connected && (
                   <button
                     className="btn btn-sm btn-primary"
                     disabled={busy !== null || !hasResolver || !checked.callerIsAdmin}
