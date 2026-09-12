@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.28;
 
-import {IPermissionedRegistry, IPermissionedResolver} from "./interfaces/IENSv2.sol";
+import {IPermissionedRegistry, IPermissionedResolver, IInodeResolver} from "./interfaces/IENSv2.sol";
 
 /// @title CapsuleMinter
 /// @notice Mints one ENSv2 subname per AI agent and wires its permissions in a single
@@ -78,6 +78,10 @@ contract CapsuleMinter {
 
     /// @notice Resolver roles granted to the capsule owner, scoped to their own name.
     uint256 public constant OWNER_NAME_ROLES = REQUIRED_RESOLVER_ROOT_ROLES;
+
+    /// @dev ENSIP-9 coin type for Ethereum. Only the hackathon resolver needs it: the
+    ///      beta's `setAddr(bytes32,address)` has coin type 60 baked in.
+    uint256 internal constant COIN_TYPE_ETH = 60;
 
     /// @dev From `EACBaseRolesLib` — bit 0 of every nybble.
     uint256 internal constant ALL_ROLES =
@@ -189,6 +193,11 @@ contract CapsuleMinter {
         /// @dev Distinguishes "connected, closed" from "never connected". Both refuse a
         ///      stranger's mint; only the first refuses the parent's own.
         bool connected;
+        /// @dev Which resolver ABI `resolver` speaks. Detected at connect time rather than
+        ///      passed, because a wrong answer here is not a revert — on the hackathon
+        ///      resolver a beta-shaped `setText(bytes32,...)` is simply a different
+        ///      selector, and getting it wrong would mean a name minted with no records.
+        bool inode;
         /// @dev The parent in DNS wire format including the root byte, e.g.
         ///      `0x0c63617073756c65666c6565740365746800` for `capsulefleet.eth`.
         bytes dnsName;
@@ -321,6 +330,7 @@ contract CapsuleMinter {
         parent.open = open;
         parent.connected = true;
         parent.dnsName = parentDns;
+        parent.inode = _isInodeResolver(address(resolver));
 
         emit ParentConnected(node, address(registry), address(resolver), msg.sender, open);
     }
@@ -354,6 +364,18 @@ contract CapsuleMinter {
     ///      into every resource by `EnhancedAccessControl`, so a registry's deployer —
     ///      who necessarily holds this, or they could not have granted the minter
     ///      `ROLE_REGISTRAR` — passes, and nobody else does.
+    /// @dev Which of the two live ENSv2 deployments `resolver` belongs to. `getRecordCount`
+    ///      exists only on the hackathon revision, so a successful staticcall returning a
+    ///      word identifies it and anything else means the beta. Probed rather than
+    ///      declared: the two resolvers disagree on the shape of every record-writing call,
+    ///      and a parameter would let a caller mis-declare their own resolver into minting
+    ///      recordless names.
+    function _isInodeResolver(address resolver) internal view returns (bool) {
+        (bool ok, bytes memory ret) =
+            resolver.staticcall(abi.encodeCall(IInodeResolver.getRecordCount, ()));
+        return ok && ret.length == 32;
+    }
+
     function _requireParentAdmin(IPermissionedRegistry registry) internal view {
         if (!registry.hasRoles(0, ROLE_REGISTRAR_ADMIN, msg.sender)) {
             revert NotParentAdmin(address(registry), msg.sender);
@@ -431,7 +453,11 @@ contract CapsuleMinter {
         // than spilling — so the split is a compiler constraint, not a style choice, and
         // collapsing it back into one body will not build.
         tokenId = _registerAndDelegate(parent, registry, label, owner, agent, node);
-        _writeRecords(parent.resolver, node, tokenId, config);
+        if (parent.inode) {
+            _writeRecordsInode(parent, label, tokenId, config);
+        } else {
+            _writeRecords(parent.resolver, node, tokenId, config);
+        }
     }
 
     /// @dev Steps 1, 2 and 4: the name exists, the owner controls it, the agent may write
@@ -451,14 +477,28 @@ contract CapsuleMinter {
         // `address(0)` subregistry: agents do not issue child names.
         tokenId = registry.register(label, owner, address(0), address(resolver), ALL_ROLES, expiry);
 
-        // Hand the owner control of this name's records, including the kill switch. Done
-        // before the record writes so a failure there cannot leave a half-owned name.
-        resolver.authorizeNameRoles(dnsName, OWNER_NAME_ROLES, owner, true);
+        if (parent.inode) {
+            // No name-scoped grant exists on this resolver, so the owner gets nothing here
+            // and the parent's admin — who holds root roles already — is the only account
+            // that can edit a capsule's records. The agent's one key is still delegated,
+            // because the runner cannot beat without it, but that grant reaches every name
+            // under this resolver rather than just this one. NOTES.md gotcha 16.
+            IInodeResolver(address(resolver)).grantSetterRoles(
+                abi.encodeCall(IInodeResolver.setText, (dnsName, KEY_HEARTBEAT, "")), agent
+            );
+            IInodeResolver(address(resolver)).setAddress(
+                dnsName, COIN_TYPE_ETH, abi.encodePacked(agent)
+            );
+        } else {
+            // Hand the owner control of this name's records, including the kill switch. Done
+            // before the record writes so a failure there cannot leave a half-owned name.
+            resolver.authorizeNameRoles(dnsName, OWNER_NAME_ROLES, owner, true);
 
-        // The agent may write exactly one key.
-        resolver.authorizeTextRoles(dnsName, KEY_HEARTBEAT, agent, true);
+            // The agent may write exactly one key.
+            resolver.authorizeTextRoles(dnsName, KEY_HEARTBEAT, agent, true);
 
-        resolver.setAddr(node, agent);
+            resolver.setAddr(node, agent);
+        }
 
         emit CapsuleMinted(parent.node, node, owner, agent, tokenId, label, expiry);
     }
@@ -488,6 +528,35 @@ contract CapsuleMinter {
 
         // ENSIP-25: this name really is the agent holding `tokenId` in this registry.
         resolver.setText(node, registrationKey(tokenId), REGISTRATION_VALUE);
+    }
+
+    /// @dev `_writeRecords` against the hackathon resolver, which addresses records by DNS
+    ///      wire name instead of namehash. Same nine keys, same order, same values.
+    ///
+    ///      The name is rebuilt here from storage rather than threaded down from `mint()`:
+    ///      the stack in that frame is already at the limit that forced this split in the
+    ///      first place, and one `abi.encodePacked` is cheaper than not compiling.
+    function _writeRecordsInode(
+        Parent storage parent,
+        string calldata label,
+        uint256 tokenId,
+        CapsuleConfig calldata config
+    ) internal {
+        IInodeResolver resolver = IInodeResolver(address(parent.resolver));
+        bytes memory dnsName = _childDnsName(parent.dnsName, label);
+
+        resolver.setText(dnsName, KEY_CLASS, CLASS_VALUE);
+        resolver.setText(dnsName, KEY_SCHEMA, SCHEMA_URI);
+
+        resolver.setText(dnsName, KEY_CONTEXT, config.context);
+        resolver.setText(dnsName, KEY_ENDPOINT_WEB, config.telegramUrl);
+        resolver.setText(dnsName, KEY_ENDPOINT_CAPSULE, config.capsuleEndpoint);
+
+        resolver.setText(dnsName, KEY_MODEL, config.model);
+        resolver.setText(dnsName, KEY_RUNTIME, config.runtime);
+        resolver.setText(dnsName, KEY_PROMPT, config.promptPointer);
+
+        resolver.setText(dnsName, registrationKey(tokenId), REGISTRATION_VALUE);
     }
 
     ////////////////////////////////////////////////////////////////////////
@@ -666,11 +735,19 @@ contract CapsuleMinter {
             bool open,
             IPermissionedResolver resolver,
             bytes32 node,
-            bytes memory dnsName
+            bytes memory dnsName,
+            bool inode
         )
     {
         Parent storage parent = _parents[address(registry)];
-        return (parent.connected, parent.open, parent.resolver, parent.node, parent.dnsName);
+        return (
+            parent.connected,
+            parent.open,
+            parent.resolver,
+            parent.node,
+            parent.dnsName,
+            parent.inode
+        );
     }
 
     /// @notice Everything that has to be true before `mint()` will work for `account`.
@@ -717,6 +794,14 @@ contract CapsuleMinter {
         returns (bool)
     {
         Parent storage parent = _requireConnected(registry);
+        if (parent.inode) {
+            // Argument-scoped, so this answers "may `agent` write `agent-heartbeat` at all
+            // on this resolver" — `label` cannot narrow it. Kept in the signature so the
+            // frontend calls one function for both deployments.
+            return parent.resolver.hasRoles(
+                uint256(keccak256(bytes(KEY_HEARTBEAT))), ROLE_SET_TEXT, agent
+            );
+        }
         bytes32 node = keccak256(abi.encodePacked(parent.node, keccak256(bytes(label))));
         return parent.resolver.hasRoles(textResourceOf(node, KEY_HEARTBEAT), ROLE_SET_TEXT, agent);
     }

@@ -19,7 +19,12 @@
  */
 import { createPublicClient, createWalletClient, http, zeroAddress, type Address } from "viem";
 import { sepolia } from "viem/chains";
-import { ETH_REGISTRY, registryAbi } from "../lib/capsule/chain";
+import { DEPLOYMENTS, ETH_REGISTRY, registryAbi } from "../lib/capsule/chain";
+
+/* This script exercises the vendored-bytecode registry deploy, which only the
+   beta has — the hackathon deployment uses a UserRegistry proxy instead and so
+   never reaches that code path. Pinned rather than detected for that reason. */
+const DEPLOYMENT = DEPLOYMENTS.beta;
 import { attachSubregistry, deploySubregistry, linkSubregistryParent } from "../lib/capsule/connect";
 import { encodeParent, parentBlocker, parentIsReady, readParentStatus } from "../lib/capsule/parent";
 import { PERMISSIONED_REGISTRY_BYTECODE } from "../lib/capsule/registry-bytecode";
@@ -94,7 +99,7 @@ async function main() {
   // --- 1. deploy ------------------------------------------------------------
   console.log("\n1. deploying PermissionedRegistry…");
   const { hash: deployHash, registry } = await deploySubregistry(
-    { walletClient, publicClient: publicClient as never, owner },
+    { walletClient, publicClient: publicClient as never, owner, deployment: DEPLOYMENT },
     (phase, detail) => console.log(`   ${phase}${detail ? ` ${detail}` : ""}`),
   );
   const receipt = await publicClient.getTransactionReceipt({ hash: deployHash });
@@ -136,7 +141,13 @@ async function main() {
   // --- 2. attach (parent -> child) -----------------------------------------
   console.log("\n2. attaching it to the name…");
   await attachSubregistry(
-    { walletClient, publicClient: publicClient as never, tokenId: before.tokenId, registry },
+    {
+      walletClient,
+      publicClient: publicClient as never,
+      tokenId: before.tokenId,
+      registry,
+      deployment: DEPLOYMENT,
+    },
     (phase, detail) => console.log(`   ${phase}${detail ? ` ${detail}` : ""}`),
   );
   const attached = await readParentStatus(publicClient as never, MINTER, parent, owner);
@@ -155,7 +166,13 @@ async function main() {
   // --- 3. link (child -> parent) -------------------------------------------
   console.log("\n3. pointing the registry back at the name…");
   await linkSubregistryParent(
-    { walletClient, publicClient: publicClient as never, registry, label: parent.label },
+    {
+      walletClient,
+      publicClient: publicClient as never,
+      registry,
+      label: parent.label,
+      deployment: DEPLOYMENT,
+    },
     (phase, detail) => console.log(`   ${phase}${detail ? ` ${detail}` : ""}`),
   );
   const after = await readParentStatus(publicClient as never, MINTER, parent, owner);
@@ -183,7 +200,7 @@ async function main() {
   const quiet = () => {};
 
   const { resolver } = await deployResolver(
-    { walletClient, publicClient: publicClient as never, admin: owner },
+    { walletClient, publicClient: publicClient as never, admin: owner, deployment: DEPLOYMENT },
     quiet,
   );
   console.log(`   resolver ${resolver}`);

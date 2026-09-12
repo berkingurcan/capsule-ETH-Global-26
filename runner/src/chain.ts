@@ -24,6 +24,27 @@ export const CHAIN = sepolia;
 /** ENSv2 Sepolia beta. Entry point for every read: resolve(name, data). */
 export const UNIVERSAL_RESOLVER_V2 = "0x4a1817d13e9cf196f471725176355c1234b63c70" as const;
 
+/** The ENS hackathon deployment's UniversalResolver. */
+export const UNIVERSAL_RESOLVER_HACKATHON =
+  "0xd26f2040D083Af1cD2962ba303F4BEa0c4faf142" as const;
+
+/**
+ * Both, in the order they are tried.
+ *
+ * Two ENSv2 deployments are live on Sepolia and a capsule's parent sits on
+ * exactly one of them. Each UniversalResolver knows only its own names and
+ * reverts `ResolverNotFound` for the other's, so a runner pinned to one address
+ * cannot boot under a name registered on the other — it reads its own config
+ * through this, so the failure is total rather than partial.
+ *
+ * Hackathon first: it is the deployment the official portal mints on, and so the
+ * one most capsules will sit under.
+ */
+export const UNIVERSAL_RESOLVERS = [
+  UNIVERSAL_RESOLVER_HACKATHON,
+  UNIVERSAL_RESOLVER_V2,
+] as const;
+
 export function createRunnerClient(rpcUrl: string): PublicClient {
   return createPublicClient({ chain: CHAIN, transport: http(rpcUrl) });
 }

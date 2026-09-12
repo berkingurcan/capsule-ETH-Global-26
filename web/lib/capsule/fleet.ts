@@ -38,6 +38,8 @@ import {
 import {
   ROLE_SET_TEXT,
   UNIVERSAL_RESOLVER_V2,
+  inodeResolverAbi,
+  inodeTextResourceOf,
   minterAbi,
   resolverAbi,
   textResourceOf,
@@ -49,6 +51,21 @@ import { encodeName } from "./resolve";
 /** The resolver events we read. Signatures verified against the deployed source. */
 export const resolverEventsAbi = parseAbi([
   "event TextChanged(bytes32 indexed node, string indexed indexedKey, string key, string value)",
+  "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
+]);
+
+/**
+ * The same history on the ENS hackathon deployment, which does not emit
+ * `TextChanged` at all.
+ *
+ * Records there are numbered rather than addressed by node, so the write event
+ * carries a `recordId` and the node appears only in `Linked` when the record is
+ * first created. Rather than replay `Linked`, the id for each capsule is read
+ * back with `getRecordId(node)` — one multicall, no log scan, and correct even
+ * for a record that was linked before `fromBlock`.
+ */
+export const inodeResolverEventsAbi = parseAbi([
+  "event TextUpdated(uint256 indexed recordId, string indexed keyHash, string key, string value)",
   "event EACRolesChanged(uint256 indexed resource, address indexed account, uint256 oldRoleBitmap, uint256 newRoleBitmap)",
 ]);
 
@@ -190,6 +207,26 @@ const RECORD_ENTRIES = Object.entries(RECORD_KEYS) as [RecordKeyName, string][];
 
 function emptyRecords(): Record<RecordKeyName, string> {
   return Object.fromEntries(RECORD_ENTRIES.map(([prop]) => [prop, ""])) as Record<RecordKeyName, string>;
+}
+
+/**
+ * Whether the parent's resolver is the ENS hackathon deployment's revision.
+ *
+ * `getRecordCount()` exists only there, so an answer identifies it and a revert
+ * means the beta — the same probe `CapsuleMinter.connectParent` uses to decide
+ * which ABI to speak.
+ */
+async function usesInodeResolver(client: PublicClient, resolver: Address): Promise<boolean> {
+  try {
+    await client.readContract({
+      address: resolver,
+      abi: inodeResolverAbi,
+      functionName: "getRecordCount",
+    });
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -435,11 +472,50 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
     return resolver;
   })()) as Address;
 
-  const heartbeatResources = names.map((n) => textResourceOf(n.node, RECORD_KEYS.heartbeat));
+  /* The EAC resource the heartbeat role sits on, which the two ENSv2 deployments
+     derive differently: `(node, key)` on the beta, `keccak256(key)` alone on the
+     hackathon revision, where the name plays no part. Getting this wrong does not
+     error — `hasRoles` answers false for a resource nobody holds — and every
+     capsule then renders as recalled. Probed once here rather than per capsule;
+     they all share the parent's resolver. */
+  const inodeResolver = await usesInodeResolver(client, resolverAddress);
+  const heartbeatResources = inodeResolver
+    ? names.map(() => inodeTextResourceOf(RECORD_KEYS.heartbeat))
+    : names.map((n) => textResourceOf(n.node, RECORD_KEYS.heartbeat));
 
-  const [records, textLogs, roleLogs, authorizations] = await Promise.all([
+  /* Record ids for the hackathon resolver, so its `TextUpdated` logs can be
+     mapped back to the names they belong to. Empty on the beta, which indexes
+     the node directly. */
+  const recordIdToNode = new Map<bigint, Hex>();
+  if (inodeResolver) {
+    const ids = (await client.multicall({
+      contracts: names.map((n) => ({
+        address: resolverAddress,
+        abi: inodeResolverAbi,
+        functionName: "getRecordId" as const,
+        args: [n.node] as const,
+      })),
+      allowFailure: true,
+    })) as { status: "success" | "failure"; result?: unknown }[];
+    ids.forEach((r, i) => {
+      if (r.status === "success" && typeof r.result === "bigint" && r.result !== 0n) {
+        recordIdToNode.set(r.result, names[i].node);
+      }
+    });
+  }
+
+  const [records, rawTextLogs, roleLogs, authorizations] = await Promise.all([
     readAllRecords(client, names, registrationKeys),
-    client.getContractEvents({
+    inodeResolver
+      ? client.getContractEvents({
+          address: resolverAddress,
+          abi: inodeResolverEventsAbi,
+          eventName: "TextUpdated",
+          args: { recordId: [...recordIdToNode.keys()] },
+          fromBlock,
+          toBlock: "latest",
+        })
+      : client.getContractEvents({
       address: resolverAddress,
       abi: resolverEventsAbi,
       eventName: "TextChanged",
@@ -486,6 +562,33 @@ export async function readFleet(client: PublicClient, config: FleetConfig): Prom
 
   const wanted = new Set<bigint>();
   for (const log of mints) if (log.blockNumber !== null) wanted.add(log.blockNumber);
+  /* One shape for both deployments. The hackathon resolver reports a `recordId`
+     where the beta reports a node, so its logs are rewritten into the beta's
+     shape here and every consumer below stays deployment-agnostic. */
+  const textLogs = (
+    inodeResolver
+      ? (rawTextLogs as unknown as {
+          args: { recordId?: bigint; key?: string; value?: string };
+          blockNumber: bigint | null;
+          transactionHash: Hex | null;
+        }[])
+          .map((log) => ({
+            args: {
+              node: recordIdToNode.get(log.args.recordId ?? 0n),
+              key: log.args.key,
+              value: log.args.value,
+            },
+            blockNumber: log.blockNumber,
+            transactionHash: log.transactionHash,
+          }))
+          .filter((log) => log.args.node !== undefined)
+      : rawTextLogs
+  ) as unknown as {
+    args: { node: Hex; key: string; value: string };
+    blockNumber: bigint | null;
+    transactionHash: Hex | null;
+  }[];
+
   for (const log of textLogs) if (log.blockNumber !== null) wanted.add(log.blockNumber);
   for (const log of roleLogs) if (log.blockNumber !== null) wanted.add(log.blockNumber);
   const times = await blockTimes(client, wanted);

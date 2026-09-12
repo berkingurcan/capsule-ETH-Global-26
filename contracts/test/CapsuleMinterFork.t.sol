@@ -59,7 +59,7 @@ contract CapsuleMinterForkTest is Test {
         if (!forked) return;
         _connect(true);
 
-        (bool connected, bool open, IPermissionedResolver resolver, bytes32 node,) =
+        (bool connected, bool open, IPermissionedResolver resolver, bytes32 node,,) =
             minter.parentOf(IPermissionedRegistry(SUBREGISTRY));
 
         assertTrue(connected);

@@ -65,6 +65,29 @@ interface IPermissionedRegistry {
         returns (bool);
 }
 
+/// @dev The ENS hackathon deployment's `PermissionedResolver`, which is a later revision
+///      than the beta's and not call-compatible with it. Records there are addressed by
+///      DNS wire name rather than namehash, and permissions hang off the *argument*
+///      alone: `setText` checks `keccak256(key)`, with the name playing no part. See
+///      NOTES.md gotcha 16 for what that costs us.
+interface IInodeResolver {
+    function setText(bytes calldata name, string calldata key, string calldata value) external;
+
+    /// @param coinType ENSIP-9. 60 is Ethereum, and `addressBytes` is then the 20 raw bytes.
+    function setAddress(bytes calldata name, uint256 coinType, bytes calldata addressBytes)
+        external;
+
+    /// @notice Grant one setter's argument-scoped role to `account`.
+    /// @param setter An abi-encoded call to the setter being authorized. Only the selector
+    ///        and the argument are read; the name and value are ignored, which is exactly
+    ///        the problem — the grant is not scoped to the name passed here.
+    function grantSetterRoles(bytes calldata setter, address account) external returns (bool);
+
+    /// @notice Number of records created. Used only as a liveness probe: the beta resolver
+    ///         has no such function, so a successful call identifies the deployment.
+    function getRecordCount() external view returns (uint256);
+}
+
 interface IPermissionedResolver {
     /// @param node The ENS namehash.
     function setText(bytes32 node, string calldata key, string calldata value) external;

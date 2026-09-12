@@ -31,8 +31,9 @@ import { hexToBytes, zeroAddress, type Address, type Hex, type PublicClient } fr
 import { namehash, normalize, packetToBytes } from "viem/ens";
 import { toHex } from "viem";
 import {
-  ETH_REGISTRAR,
-  ETH_REGISTRY,
+  ACTIVE,
+  deploymentOfName,
+  type DeploymentAddresses,
   ROLE_REGISTRAR,
   ROLE_REGISTRAR_ADMIN,
   ROLE_SET_SUBREGISTRY,
@@ -121,9 +122,10 @@ export function encodeParent(raw: string): ParentName {
 export async function readParentRegistry(
   client: PublicClient,
   parent: ParentName,
+  deployment: DeploymentAddresses = ACTIVE,
 ): Promise<Address | null> {
   const registry = await client.readContract({
-    address: ETH_REGISTRY,
+    address: deployment.ethRegistry,
     abi: registryAbi,
     functionName: "getSubregistry",
     args: [parent.label],
@@ -141,6 +143,21 @@ export async function readParentRegistry(
  */
 export type ParentStatus = {
   parent: ParentName;
+  /**
+   * Which ENSv2 deployment this name actually lives on.
+   *
+   * Detected from the name rather than configured, because both deployments are
+   * live on Sepolia at once and a name exists on exactly one of them. Every
+   * subsequent call in /connect is addressed using this — the registry to attach
+   * to, the factory to deploy through, the resolver ABI to speak — so that a
+   * name registered on the ENS hackathon portal and a name registered on the
+   * beta both work without the user knowing there is a difference.
+   *
+   * Falls back to the active deployment for a name nobody has registered, where
+   * there is no fact to detect and the only sensible guess is where /register
+   * would put it.
+   */
+  deployment: DeploymentAddresses;
   /**
    * Whether the name exists at all.
    *
@@ -220,10 +237,16 @@ export async function readParentStatus(
   parent: ParentName,
   account: Address,
 ): Promise<ParentStatus> {
+  /* Which deployment owns this label, before anything is asked about it. Every
+     read below is addressed relative to the answer, so a hackathon-registered
+     name is never interrogated against the beta's registry — which is what made
+     portal-minted names look unregistered here. */
+  const deployment = (await deploymentOfName(client, parent.label)) ?? ACTIVE;
+
   const [registry, available, tokenId] = await Promise.all([
-    readParentRegistry(client, parent),
+    readParentRegistry(client, parent, deployment),
     client.readContract({
-      address: ETH_REGISTRAR,
+      address: deployment.ethRegistrar,
       abi: ethRegistrarAbi,
       functionName: "isAvailable",
       args: [parent.label],
@@ -233,7 +256,7 @@ export async function readParentStatus(
        `registered: false` means further down. */
     client
       .readContract({
-        address: ETH_REGISTRY,
+        address: deployment.ethRegistry,
         abi: registryAbi,
         functionName: "findTokenId",
         args: [parent.label],
@@ -252,7 +275,7 @@ export async function readParentStatus(
         ? false
         : await client
             .readContract({
-              address: ETH_REGISTRY,
+              address: deployment.ethRegistry,
               abi: registryAbi,
               functionName: "hasRoles",
               args: [tokenId, ROLE_SET_SUBREGISTRY, account],
@@ -261,6 +284,7 @@ export async function readParentStatus(
 
     return {
       parent,
+      deployment,
       registered,
       registry: null,
       tokenId,
@@ -306,7 +330,7 @@ export async function readParentStatus(
       ? Promise.resolve(false)
       : client
           .readContract({
-            address: ETH_REGISTRY,
+            address: deployment.ethRegistry,
             abi: registryAbi,
             functionName: "hasRoles",
             args: [tokenId, ROLE_SET_SUBREGISTRY, account],
@@ -318,7 +342,7 @@ export async function readParentStatus(
      the wrong label resolves upward to a name that is not this one. */
   const parentLinked =
     linked !== null &&
-    linked[0].toLowerCase() === ETH_REGISTRY.toLowerCase() &&
+    linked[0].toLowerCase() === deployment.ethRegistry.toLowerCase() &&
     linked[1] === parent.label;
 
   const [connected, registrarGranted, resolverRolesGranted, open, callerMayMint] = readiness;
@@ -326,6 +350,7 @@ export async function readParentStatus(
 
   return {
     parent,
+    deployment,
     registered,
     registry,
     tokenId,
@@ -523,7 +548,14 @@ export async function readOwnerParents(
   const parents: OwnedParent[] = [];
   stored.forEach((result, index) => {
     if (result.status !== "success") return;
-    const [connected, open, , node, dnsName] = result.result as readonly [boolean, boolean, Address, Hex, Hex];
+    const [connected, open, , node, dnsName] = result.result as readonly [
+      boolean,
+      boolean,
+      Address,
+      Hex,
+      Hex,
+      boolean,
+    ];
     if (!connected) return;
 
     const name = decodeDnsName(dnsName);

@@ -21,10 +21,62 @@ import {
   type PublicClient,
 } from "viem";
 import { namehash, normalize, packetToBytes } from "viem/ens";
-import { resolverAbi, universalResolverAbi, UNIVERSAL_RESOLVER_V2 } from "./chain";
+import { ACTIVE, DEPLOYMENTS, resolverAbi, universalResolverAbi } from "./chain";
 import { RECORD_KEYS } from "./records";
 
 export type NameEncoding = { name: string; node: Hex; dnsName: Hex };
+
+/**
+ * The UniversalResolvers to try, active deployment first.
+ *
+ * Two ENSv2 deployments are live on Sepolia and a capsule may sit under a name
+ * on either — one registered through the ENS hackathon portal, one through the
+ * beta. Each deployment's UniversalResolver knows only its own names and answers
+ * `ResolverNotFound` for the other's, so a single hardcoded address makes half
+ * the fleet invisible.
+ *
+ * Ordered rather than raced: the active deployment answers for almost every
+ * name, so the second entry is a fallback that normally costs nothing. Reads go
+ * through ENSIP-10 `resolve()` either way, which is the one calling convention
+ * both revisions share — the hackathon resolver has no `text(bytes32,string)` to
+ * call directly.
+ */
+const UNIVERSAL_RESOLVERS = [
+  ACTIVE.universalResolver,
+  ...Object.values(DEPLOYMENTS)
+    .filter((d) => d.id !== ACTIVE.id)
+    .map((d) => d.universalResolver),
+];
+
+/**
+ * `resolve()` against whichever deployment knows the name.
+ *
+ * A name absent from a deployment reverts (`ResolverNotFound`), so a revert is
+ * not necessarily an error — it is how "ask the other one" is spelled. Only when
+ * every deployment has refused is the failure real, and then the first
+ * deployment's error is the one rethrown, because that is the one the caller
+ * expected to work.
+ */
+async function resolveAnywhere(
+  client: PublicClient,
+  dnsName: Hex,
+  data: Hex,
+): Promise<readonly [Hex, Address]> {
+  let first: unknown;
+  for (const address of UNIVERSAL_RESOLVERS) {
+    try {
+      return await client.readContract({
+        address,
+        abi: universalResolverAbi,
+        functionName: "resolve",
+        args: [dnsName, data],
+      });
+    } catch (error) {
+      first ??= error;
+    }
+  }
+  throw first;
+}
 
 /**
  * Normalisation is not cosmetic here. These names arrive from strangers over
@@ -46,12 +98,7 @@ export async function readAddr(client: PublicClient, name: string): Promise<Addr
   const { node, dnsName } = encodeName(name);
   const data = encodeFunctionData({ abi: resolverAbi, functionName: "addr", args: [node] });
 
-  const [result, resolver] = await client.readContract({
-    address: UNIVERSAL_RESOLVER_V2,
-    abi: universalResolverAbi,
-    functionName: "resolve",
-    args: [dnsName, data],
-  });
+  const [result, resolver] = await resolveAnywhere(client, dnsName, data);
 
   const address =
     result === "0x"
@@ -70,12 +117,7 @@ export async function readText(
   const { node, dnsName } = encodeName(name);
   const data = encodeFunctionData({ abi: resolverAbi, functionName: "text", args: [node, key] });
 
-  const [result, resolver] = await client.readContract({
-    address: UNIVERSAL_RESOLVER_V2,
-    abi: universalResolverAbi,
-    functionName: "resolve",
-    args: [dnsName, data],
-  });
+  const [result, resolver] = await resolveAnywhere(client, dnsName, data);
 
   const value =
     result === "0x"
@@ -109,18 +151,15 @@ export async function readIdentity(
     encodeFunctionData({ abi: resolverAbi, functionName: "text", args: [node, RECORD_KEYS.model] }),
   ];
 
-  const results = await client.multicall({
-    contracts: calls.map((data) => ({
-      address: UNIVERSAL_RESOLVER_V2,
-      abi: universalResolverAbi,
-      functionName: "resolve" as const,
-      args: [dnsName, data] as const,
-    })),
-    allowFailure: false,
-  });
-
-  const [addrData, addrResolver] = results[0] as readonly [Hex, Address];
-  const [modelData] = results[1] as readonly [Hex, Address];
+  /* Sequential across the two calls rather than a multicall, because the
+     deployment a name lives on is discovered by trying: a multicall pinned to
+     one UniversalResolver cannot fall back per call. Both still describe the
+     same instant for the purpose this serves — they are two reads of a record
+     pair that only the name's owner can change, not a race against a writer. */
+  const [[addrData, addrResolver], [modelData]] = await Promise.all([
+    resolveAnywhere(client, dnsName, calls[0]),
+    resolveAnywhere(client, dnsName, calls[1]),
+  ]);
 
   const address =
     addrData === "0x"
