@@ -5,7 +5,7 @@ import { WalletProvider } from "@/lib/wallet/WalletProvider";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "Capsule — one name, a whole fleet",
+  title: "Capsule",
   description:
     "Launchpad and fleet dashboard for ENSv2 agents. The name is the agent: settings live in the record, and the right to run is a role you can pull.",
 };
