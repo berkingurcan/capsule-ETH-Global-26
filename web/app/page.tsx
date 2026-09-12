@@ -146,22 +146,6 @@ const CSS = `
   50% { transform: translate3d(0, -12px, 0) rotate(-4deg); }
 }
 
-.lp-spark {
-  position: absolute;
-  width: clamp(13px, 1.5vw, 19px);
-  height: auto;
-  animation: lp-twinkle 3.4s ease-in-out infinite;
-  animation-delay: var(--dl);
-  transform-origin: center;
-}
-.lp-s1 { top: 13%; right: 27%; --dl: 0s; }
-.lp-s2 { bottom: 30%; right: 15%; --dl: -1.2s; }
-.lp-s3 { top: 34%; left: 6%; --dl: -2.3s; }
-@keyframes lp-twinkle {
-  0%, 100% { transform: scale(0.55) rotate(0deg); opacity: 0.3; }
-  50% { transform: scale(1) rotate(45deg); opacity: 1; }
-}
-
 .lp-chip {
   position: absolute;
   top: -15px;
@@ -196,7 +180,10 @@ const CSS = `
   white-space: nowrap;
 }
 @media (prefers-reduced-motion: reduce) {
-  .lp-bob, .lp-mark-in, .lp-spark { animation: none; }
+  /* has to out-specify the per-capsule animation-name rules above — a media
+     query adds no specificity of its own, so a bare .lp-bob reset loses */
+  .lp-art .lp-float .lp-bob,
+  .lp-art .lp-mark .lp-mark-in { animation-name: none; }
   .lp-bob svg { transition: none; }
 }
 

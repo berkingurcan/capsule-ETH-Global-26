@@ -24,8 +24,6 @@ const FLOATS = [
   { cls: "lp-f4", cap: "#FFC42E", size: 46 },
 ];
 
-const SPARKS = ["lp-s1", "lp-s2", "lp-s3"];
-
 const clamp = (n: number, lo: number, hi: number) => (n < lo ? lo : n > hi ? hi : n);
 
 export default function HeroArt() {
@@ -114,18 +112,6 @@ export default function HeroArt() {
     <div className="lp-stage">
       <div className="lp-art" ref={art} aria-hidden="true">
         <span className="lp-chip">agent.yourname.eth</span>
-
-        {SPARKS.map((c) => (
-          <svg key={c} className={"lp-spark " + c} viewBox="0 0 24 24" width="24" height="24">
-            <path
-              d="M12 0 L14.6 9.4 L24 12 L14.6 14.6 L12 24 L9.4 14.6 L0 12 L9.4 9.4 Z"
-              fill="#FFC42E"
-              stroke="#12203F"
-              strokeWidth="1.7"
-              strokeLinejoin="round"
-            />
-          </svg>
-        ))}
 
         {FLOATS.map((f) => (
           <span key={f.cls} className={"lp-float " + f.cls}>
