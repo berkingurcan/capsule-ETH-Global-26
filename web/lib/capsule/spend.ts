@@ -13,6 +13,29 @@
  * name-level. That is the same grant the recall runs on, and it is why a
  * spending policy needed no contract change and no redeploy.
  *
+ * On the ENS hackathon deployment that sentence is only half true, and the
+ * difference is worth stating rather than discovering: `_registerAndDelegate`
+ * takes the `parent.inode` branch there and grants the capsule owner nothing,
+ * because that resolver revision has no name-scoped grant to make. What lets an
+ * owner write this record there is the root `ROLE_SET_TEXT` they hold from
+ * having deployed their own resolver in /connect — so it works for a parent you
+ * own, and not for somebody else's parent you were merely allowed to mint under.
+ *
+ * ## Two resolver revisions, two spellings of the same write
+ *
+ * Both deployments are live on Sepolia at once and a capsule's parent sits on
+ * one of them:
+ *
+ *   beta       setText(bytes32 node, string key, string value)
+ *   hackathon  setText(bytes name,   string key, string value)
+ *
+ * Not a superset — a different selector. Sending the beta shape to a hackathon
+ * resolver is not a revert with a reason, it is a call to a function that is not
+ * there, and the launchpad reports it as a warning and mints anyway. The result
+ * is a capsule whose owner typed a limit, paid nothing, and got no record. So
+ * the revision is probed here rather than assumed, exactly as `recall.ts` and
+ * `CapsuleMinter.connectParent` probe it.
+ *
  * ## A second transaction, and deliberately not part of the mint
  *
  * The launchpad's promise is one signature and one transaction per capsule.
@@ -38,8 +61,9 @@
  */
 import type { Address, Hex, PublicClient, WalletClient } from "viem";
 import { BaseError, ContractFunctionRevertedError, parseEther } from "viem";
-import { resolverTextAbi } from "./chain";
+import { inodeResolverAbi, resolverTextAbi } from "./chain";
 import { POLICY_KEYS } from "./records";
+import { encodeName } from "./resolve";
 
 /**
  * The largest cap the runner will honour, in ETH.
@@ -119,7 +143,7 @@ function explain(error: unknown): SpendCapError {
       if (reverted.data?.errorName === "EACUnauthorizedAccountRoles") {
         return new SpendCapError(
           "denied",
-          "This wallet cannot write records on that name — the mint grants ROLE_SET_TEXT to the owner, so check you are connected as the account that minted it.",
+          "This wallet cannot write records on that name — check you are connected as the account that minted it, and that the parent is a name you own rather than one you were allowed to mint under.",
         );
       }
       return new SpendCapError("reverted", reverted.data?.errorName ?? reverted.shortMessage);
@@ -138,6 +162,14 @@ export type SetSpendCapArgs = {
   resolver: Address;
   /** The capsule's namehash, straight off the mint receipt. */
   node: Hex;
+  /**
+   * The capsule's full name — `"trader.testiki.eth"`.
+   *
+   * What the hackathon resolver addresses records by, once DNS-encoded. Passed
+   * in rather than derived from `node`, because a namehash is one-way: there is
+   * nothing to walk back to a name from.
+   */
+  name: string;
   /** A decimal ETH amount. Validated by `spendCapProblems` before this is called. */
   cap: string;
 };
@@ -147,6 +179,32 @@ export type SpendCapReceipt = {
   cap: string;
   blockNumber: bigint;
 };
+
+/**
+ * Which resolver revision this capsule's name is served by.
+ *
+ * `getRecordCount()` exists only on the ENS hackathon deployment's revision, so
+ * an answer identifies it and a revert means the beta. One read before a
+ * transaction the owner is about to sign, which is the cheapest possible
+ * insurance against sending a selector the resolver does not have — and that
+ * failure is silent in the worst way, because the launchpad is designed to warn
+ * rather than fail when the cap does not land.
+ */
+async function usesInodeResolver(
+  publicClient: PublicClient,
+  resolver: Address,
+): Promise<boolean> {
+  try {
+    await publicClient.readContract({
+      address: resolver,
+      abi: inodeResolverAbi,
+      functionName: "getRecordCount",
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 /**
  * Write `agent-spend-cap` on a freshly minted capsule.
@@ -166,22 +224,35 @@ export async function setSpendCap(
   args: SetSpendCapArgs,
   onPhase?: (phase: SpendCapPhase, detail?: string) => void,
 ): Promise<SpendCapReceipt> {
-  const { walletClient, publicClient, resolver, node, cap } = args;
+  const { walletClient, publicClient, resolver, node, name, cap } = args;
   const account = walletClient.account;
   if (account === undefined) throw new SpendCapError("failed", "the wallet client has no account");
 
   const value = cap.trim();
+  const inode = await usesInodeResolver(publicClient, resolver);
 
   onPhase?.("simulating");
   let request;
   try {
-    const simulated = await publicClient.simulateContract({
-      address: resolver,
-      abi: resolverTextAbi,
-      functionName: "setText",
-      args: [node, POLICY_KEYS.spendCap, value],
-      account: account.address,
-    });
+    /* Two deployments, two spellings of the same write. The hackathon revision
+       addresses records by DNS wire name and namehashes it itself, so `node` has
+       no slot in that call — passing it as the `bytes` would encode cleanly and
+       write a record on a name nobody owns. */
+    const simulated = inode
+      ? await publicClient.simulateContract({
+          address: resolver,
+          abi: inodeResolverAbi,
+          functionName: "setText",
+          args: [encodeName(name).dnsName, POLICY_KEYS.spendCap, value],
+          account: account.address,
+        })
+      : await publicClient.simulateContract({
+          address: resolver,
+          abi: resolverTextAbi,
+          functionName: "setText",
+          args: [node, POLICY_KEYS.spendCap, value],
+          account: account.address,
+        });
     request = simulated.request;
   } catch (error) {
     throw explain(error);
@@ -190,7 +261,7 @@ export async function setSpendCap(
   onPhase?.("signing");
   let hash: Hex;
   try {
-    hash = await walletClient.writeContract(request);
+    hash = await walletClient.writeContract(request as never);
   } catch (error) {
     throw explain(error);
   }

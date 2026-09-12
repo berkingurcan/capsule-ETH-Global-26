@@ -96,12 +96,17 @@ async function checkTransaction(): Promise<void> {
 
   // Runtime `0x00` — STOP. Accepts any call, returns nothing, which is exactly
   // the shape of `setText(bytes32,string,string)`.
+  //
+  // It also answers `getRecordCount()` with nothing, which fails to decode as a
+  // uint256 — so `setSpendCap` probes this as the beta revision and takes the
+  // namehash branch, which is the one being checked below.
   const resolver = await deploy("0x600060005360016000f3");
 
   const node = `0x${"ab".repeat(32)}` as Hex;
+  const name = "trader.capsulefleet.eth";
   const phases: string[] = [];
   const receipt = await setSpendCap(
-    { walletClient, publicClient, resolver, node, cap: " 0.003 " },
+    { walletClient, publicClient, resolver, node, name, cap: " 0.003 " },
     (phase) => phases.push(phase),
   );
 
@@ -116,7 +121,7 @@ async function checkTransaction(): Promise<void> {
   // caller as a sentence rather than as a nested viem dump.
   const refuses = await deploy("0x60fe60005360016000f3");
   try {
-    await setSpendCap({ walletClient, publicClient, resolver: refuses, node, cap: "0.003" });
+    await setSpendCap({ walletClient, publicClient, resolver: refuses, node, name, cap: "0.003" });
     ok("a refusing resolver is reported", false, "no error was thrown");
   } catch (error) {
     ok("a refusing resolver is reported as a SpendCapError", error instanceof SpendCapError, String(error).slice(0, 90));
