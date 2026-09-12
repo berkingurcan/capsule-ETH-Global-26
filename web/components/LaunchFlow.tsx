@@ -1330,7 +1330,14 @@ function StepMint({
           try {
             say(i, `${POLICY_KEYS.spendCap} · sign to allow ${cap} ETH per transaction`);
             const capped = await setSpendCap(
-              { walletClient, publicClient, resolver: parent.resolver, node: receipt.node, cap },
+              {
+                walletClient,
+                publicClient,
+                resolver: parent.resolver,
+                node: receipt.node,
+                name: `${draft.slug}.${parent.parent.name}`,
+                cap,
+              },
               (phase, detail) => {
                 if (phase === "mining") say(i, `sent ${detail}`);
               },
