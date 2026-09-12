@@ -274,6 +274,11 @@ export const ALL_ROLES =
 export const verifiableFactoryAbi = parseAbi([
   "event ProxyDeployed(address indexed sender, address indexed proxyAddress, uint256 salt, address implementation)",
   "function deployProxy(address implementation, uint256 salt, bytes data) returns (address)",
+  // The shared EIP-1167 logic every proxy clones. Read once so `predictProxyAddress`
+  // can compute a proxy's address before it exists, which is what lets the whole
+  // connect flow go into one EIP-5792 batch: call 2 can reference the contract call
+  // 1 has not deployed yet.
+  "function proxyLogic() view returns (address)",
 ]);
 
 export const resolverInitAbi = parseAbi([

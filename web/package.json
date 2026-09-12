@@ -25,6 +25,7 @@
     "check:register": "node --env-file=.env.local --import tsx scripts/check-register.ts",
     "fork:register": "node --import tsx scripts/fork-register.ts",
     "fork:subregistry": "node --import tsx scripts/fork-subregistry.ts",
+    "fork:connect": "node --env-file-if-exists=.env.local --import tsx scripts/fork-connect.ts",
     "fix:endpoint": "node --env-file=.env.local --import tsx scripts/fix-endpoint.ts",
     "check:spend": "tsx scripts/check-spend.ts"
   },
